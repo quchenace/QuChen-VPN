@@ -19,7 +19,7 @@ from . import sysproxy
 from . import updater
 
 APP_TITLE = "QuChen VPN"
-APP_VER = "1.0.5"
+APP_VER = "1.0.6"
 UPDATE_REPO = "quchenace/QuChen-VPN"
 
 
