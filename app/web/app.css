@@ -444,3 +444,9 @@ svg { fill: none; }
 .task-text { font-size: 12.5px; color: var(--text); }
 .task-bar { width: 90px; height: 4px; background: var(--bg-soft-2); border-radius: 4px; overflow: hidden; }
 .task-bar-fill { height: 100%; width: 0; background: var(--blue); border-radius: 4px; transition: width .3s; }
+
+#forceUpdate { position: fixed; inset: 0; z-index: 9999; background: rgba(12, 16, 24, .82); display: flex; align-items: center; justify-content: center; }
+#forceUpdate .fu-card { background: #fff; border-radius: 16px; padding: 28px 32px; max-width: 460px; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,.35); }
+#forceUpdate h2 { margin: 0 0 10px; font-size: 20px; }
+#forceUpdate p { margin: 0 0 16px; color: #4b5563; }
+#forceUpdate .small { font-size: 12px; margin: 12px 0 0; }
