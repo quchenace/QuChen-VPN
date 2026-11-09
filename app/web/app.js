@@ -54,11 +54,16 @@ function toast(msg, kind = 'ok') {
 }
 
 /* ---------------------------------------------------------------- 桥接 */
+let _booted = false;
 function bridgeReady() {
+  if (_booted || !window.pywebview || !window.pywebview.api) return;
+  _booted = true;
   API = window.pywebview.api;
   boot();
 }
-window.addEventListener('pywebviewready', bridgeReady);
+// The bridge may already be there: pywebview can fire 'pywebviewready' before this script runs.
+if (window.pywebview && window.pywebview.api) bridgeReady();
+else window.addEventListener('pywebviewready', bridgeReady);
 
 /* 浏览器内预览（无 pywebview 时用假数据，保证界面可独立调试） */
 function mockApi() {
@@ -646,5 +651,7 @@ function bindEvents() {
   document.head.appendChild(style);
   bindEvents();
   // 若 5 秒内 pywebview 未就绪，进入浏览器预览模式
-  setTimeout(() => { if (!API) { API = mockApi(); boot(); } }, 5000);
+  // Only a real browser preview may fall back to demo data; the desktop app must keep waiting for the bridge.
+  const inBrowser = /^https?:$/.test(location.protocol);
+  setTimeout(() => { if (!_booted && inBrowser) { API = mockApi(); boot(); } else if (!_booted) { bridgeReady(); } }, 5000);
 })();
