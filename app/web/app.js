@@ -225,7 +225,32 @@ function paint() {
   renderTraffic(s);
 }
 
+function forceUpdateGate(u) {
+  let el = document.getElementById('forceUpdate');
+  if (!u || !u.has_update) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'forceUpdate';
+    el.innerHTML = '<div class="fu-card"><h2>需要更新到 <span id="fuVer"></span></h2>' +
+      '<p>这个版本已经停止支持。更新会保留你的线路与设置。</p>' +
+      '<button id="fuGo" class="btn-blue">立即更新</button><p id="fuMsg" class="small"></p></div>';
+    document.body.appendChild(el);
+    document.getElementById('fuGo').onclick = async () => {
+      const m = document.getElementById('fuMsg');
+      m.textContent = '正在下载…';
+      try {
+        const d = await API.download_update();
+        if (!d || !d.ok) { m.textContent = (d && d.msg) || '下载失败，请稍后再试。'; return; }
+        m.textContent = '正在安装，程序会自动重启…';
+        await API.install_update();
+      } catch (e) { m.textContent = '更新失败：' + e; }
+    };
+  }
+  document.getElementById('fuVer').textContent = u.latest || '';
+}
+
 function paintUpdate(u) {
+  forceUpdateGate(u);
   if (!u) return;
   if (u.latest) $('#kvLatest').textContent = u.latest;
   $('#kvUpdateMsg').textContent = u.msg || '尚未检查';
