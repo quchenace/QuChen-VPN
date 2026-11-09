@@ -63,12 +63,24 @@ jobs:
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File build.ps1
 
+      - name: Build the installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress | Out-Null
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = (Get-ChildItem "C:\Program Files*\Inno Setup*\ISCC.exe" | Select-Object -First 1).FullName }
+          & $iscc "installer.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          Get-ChildItem release | Select-Object Name, Length
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.version || github.ref_name }}
           name: "QuChen VPN ${{ github.event.inputs.version || github.ref_name }}"
-          files: release/QuChenVPN-win64.zip
+          files: |
+            release/QuChenVPN-win64.zip
+            release/QuChenVPN-Setup.exe
           generate_release_notes: true
           draft: false
           prerelease: false
