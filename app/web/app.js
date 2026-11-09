@@ -243,7 +243,8 @@ function paintUpdate(u) {
   else if (u.downloading) btn.textContent = '下载中 ' + (u.progress || 0) + '%';
   else btn.textContent = '立即更新';
   // 设置页入口红点
-  const navBtn = null;
+  const navBtn = $('.nav-item[data-page="settings"]'); 
+  if (navBtn) navBtn.onclick = () => showPage('settings');
   if (navBtn) {
     let dot = navBtn.querySelector('.badge-dot');
     if (u.has_update && !dot) {
