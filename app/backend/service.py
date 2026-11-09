@@ -19,7 +19,7 @@ from . import sysproxy
 from . import updater
 
 APP_TITLE = "QuChen VPN"
-APP_VER = "1.0.0"
+APP_VER = "1.0.1"
 UPDATE_REPO = "quchenace/QuChen-VPN"
 
 
@@ -389,7 +389,26 @@ class Service:
                 "country": n.get("_country") or N.guess_country(n.get("name", "")),
                 "flag": N.FLAGS.get(n.get("_country") or N.guess_country(n.get("name", "")), "🌐"),
             })
+        # 已测速且延迟低的排前面，未测速的排后面
+        out.sort(key=lambda x: (0 if x["delay"] else 1, x["delay"] or 99999))
         return out
+
+    def maybe_autotest(self):
+        """节点池里未测速节点过多时，后台自动跑一轮测速（6 小时内只跑一次）。"""
+        nodes = self.nodes()
+        if not nodes or self.task.get("running"):
+            return False
+        verified = sum(1 for n in nodes if isinstance(n.get("delay"), int))
+        if verified >= max(30, len(nodes) * 0.5):
+            return False
+        last = float(self.settings.get("last_autotest", 0) or 0)
+        if time.time() - last < 6 * 3600:
+            return False
+        self.settings["last_autotest"] = time.time()
+        self.save_settings()
+        self._log("[speed] 节点池未测速较多，自动开始后台测速")
+        self.test_speed()
+        return True
 
     def test_speed(self, names=None):
         """后台测速：返回任务状态。"""

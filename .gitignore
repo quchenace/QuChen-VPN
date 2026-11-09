@@ -26,3 +26,8 @@ tools/*.png
 tools/*.json
 tools/raw_*
 *.log
+
+tools/.token
+
+# 由 CI 或本地脚本生成
+app/assets/seed_pool.json

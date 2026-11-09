@@ -52,12 +52,17 @@ def diversify(proxies, limit=1000, per_country=80, per_host=4, prefer=None, max_
     return out
 
 
+UDP_PROTOCOLS = ("hysteria2", "hysteria", "tuic", "wireguard")
+
+
 def tcp_prefilter(proxies, workers=600, timeout=2.5, logger=print):
-    """并行 TCP 连通性预筛，快速砍掉不可达节点。"""
+    """并行 TCP 连通性预筛；UDP 协议（hysteria2/tuic）不做 TCP 探测，直接保留。"""
     import concurrent.futures as cf
     import socket
 
     def probe(p):
+        if str(p.get("type", "")).lower() in UDP_PROTOCOLS:
+            return p
         try:
             s = socket.create_connection((str(p.get("server")), int(p.get("port"))), timeout=timeout)
             s.close()

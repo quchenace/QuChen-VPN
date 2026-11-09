@@ -41,6 +41,10 @@ class Api:
 
     # -------------------------------------------------- 基础数据
     def bootstrap(self):
+        try:
+            threading.Timer(1.5, self.svc.maybe_autotest).start()
+        except Exception:
+            pass
         return {
             "state": self.svc.state(),
             "nodes": self.svc.node_list(),

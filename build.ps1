@@ -1,10 +1,9 @@
-# 打包 QuChen VPN（PyInstaller onedir）
+# Build QuChen VPN (PyInstaller onedir)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
-$py = "python"
-& $py -m PyInstaller --noconfirm --clean --windowed `
+python -m PyInstaller --noconfirm --clean --windowed `
     --name QuChenVPN `
     --icon "app\assets\app.ico" `
     --add-data "app\web;web" `
@@ -22,16 +21,18 @@ $py = "python"
     --exclude-module pandas `
     app\main.py
 
-if ($LASTEXITCODE -ne 0) { throw "PyInstaller 构建失败" }
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
 $dist = Join-Path $root "dist\QuChenVPN"
-if (-not (Test-Path $dist)) { throw "产物目录不存在: $dist" }
+if (-not (Test-Path $dist)) { throw "dist folder missing: $dist" }
 
-# 图标与种子池随包（PyInstaller 已包含 assets，这里再确保根目录有一份 ico）
 $rel = Join-Path $root "release"
 New-Item -ItemType Directory -Force -Path $rel | Out-Null
 $zip = Join-Path $rel "QuChenVPN-win64.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
-Compress-Archive -Path (Join-Path $dist "*") -DestinationPath $zip -CompressionLevel Optimal
-Write-Host "打包完成: $zip"
-Write-Host ("大小: {0:N1} MB" -f ((Get-Item $zip).Length / 1MB))
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::CreateFromDirectory($dist, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+
+$mb = (Get-Item $zip).Length / 1MB
+Write-Host ("package ok: {0} ({1:N1} MB)" -f $zip, $mb)

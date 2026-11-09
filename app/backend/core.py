@@ -39,7 +39,7 @@ def pick_port(start=MIXED_PORT, span=400) -> int:
     for p in range(start, start + span):
         if free_port(p):
             return p
-    return start
+    return random.randint(20000, 60000)
 
 
 def rand_secret(n=20) -> str:
@@ -197,15 +197,30 @@ class Core:
     # -------------------------------------------------- 构建配置
     def build(self, proxies, mode="rule", tun=False, prefer_port=None,
               extra_groups=None, compact_groups=False):
-        self.mixed_port = pick_port(prefer_port or MIXED_PORT)
-        self.ctrl_port = pick_port(CTRL_PORT, 200)
+        self._proxies = proxies
+        self._opts = dict(mode=mode, tun=tun, prefer_port=prefer_port,
+                          extra_groups=extra_groups, compact_groups=compact_groups)
+        self._apply_ports(pick_port(prefer_port or MIXED_PORT), self._random_port())
+        return self.cfg
+
+    def _apply_ports(self, mixed, ctrl):
+        o = getattr(self, "_opts", {})
+        self.mixed_port = mixed
+        self.ctrl_port = ctrl
         self.secret = rand_secret(24)
         self.cfg = build_config(
-            proxies, mixed_port=self.mixed_port, secret=self.secret,
-            ctrl_port=self.ctrl_port, mode=mode, tun=tun, home=self.home,
-            extra_groups=extra_groups, compact_groups=compact_groups,
+            self._proxies, mixed_port=mixed, secret=self.secret, ctrl_port=ctrl,
+            mode=o.get("mode", "rule"), tun=o.get("tun", False), home=self.home,
+            extra_groups=o.get("extra_groups"), compact_groups=o.get("compact_groups", False),
         )
-        return self.cfg
+
+    @staticmethod
+    def _random_port() -> int:
+        for _ in range(60):
+            p = random.randint(20000, 60000)
+            if free_port(p):
+                return p
+        return random.randint(20000, 60000)
 
 
     # -------------------------------------------------- 日志
@@ -326,43 +341,51 @@ class Core:
 
     # -------------------------------------------------- 生命周期
     def start(self, cfg: dict | None = None):
-        cfg = cfg or self.cfg
-        if cfg is None:
-            raise RuntimeError("尚未构建配置")
+        """启动内核；若控制口/混合端口被其他实例占用（表现为 401 或无响应）则换端口重试。"""
         self.stop()
-        os.makedirs(self.home, exist_ok=True)
-        cfg_path = os.path.join(self.home, "config.yaml")
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            f.write(dump_yaml(cfg))
-        self.write_overrides(cfg)
+        attempts = 3
+        for attempt in range(attempts):
+            cfg = cfg or self.cfg
+            if cfg is None:
+                raise RuntimeError("尚未构建配置")
+            os.makedirs(self.home, exist_ok=True)
+            cfg_path = os.path.join(self.home, "config.yaml")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write(dump_yaml(cfg))
 
-        env = dict(os.environ)
-        env["MIHOMO_HOME"] = self.home
-        self.log(f"[core] 启动内核 {os.path.basename(self.exe)} 端口 {self.mixed_port} 控制台 {self.ctrl_port}")
-        creation = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
-        self.proc = subprocess.Popen(
-            [self.exe, "-d", self.home, "-f", cfg_path],
-            cwd=self.home, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=env, creationflags=creation,
-        )
-        self._stop_flag.clear()
-        self._log_thread = threading.Thread(target=self._pipe_logs, daemon=True)
-        self._log_thread.start()
-        threading.Thread(target=self._pipe_stderr, daemon=True).start()
+            env = dict(os.environ)
+            env["MIHOMO_HOME"] = self.home
+            self.log(f"[core] 启动内核 {os.path.basename(self.exe)} 端口 {self.mixed_port} 控制台 {self.ctrl_port}")
+            creation = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+            self.proc = subprocess.Popen(
+                [self.exe, "-d", self.home, "-f", cfg_path],
+                cwd=self.home, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=env, creationflags=creation,
+            )
+            self._stop_flag.clear()
+            self._log_thread = threading.Thread(target=self._pipe_logs, daemon=True)
+            self._log_thread.start()
+            threading.Thread(target=self._pipe_stderr, daemon=True).start()
 
-        # 等待 API 就绪
-        ok = False
-        for _ in range(60):
-            time.sleep(0.25)
-            if self.proc.poll() is not None:
+            ok = False
+            for _ in range(24):
+                time.sleep(0.25)
+                if self.proc.poll() is not None:
+                    break
+                if self.version():
+                    ok = True
+                    break
+            if ok:
                 break
-            if self.version():
-                ok = True
-                break
-        if not ok:
-            self.log("[core] 内核启动失败")
             self.stop()
-            raise RuntimeError("内核启动失败，请查看日志")
+            if attempt == attempts - 1:
+                self.log("[core] 内核启动失败")
+                raise RuntimeError("内核启动失败，请查看日志")
+            # 换一组随机端口再试，避开被其他实例 SO_REUSEADDR 抢占的端口
+            self._apply_ports(self._random_port(), self._random_port())
+            cfg = self.cfg
+            self.log(f"[core] 端口不可用，改用 {self.mixed_port} / {self.ctrl_port} 重试")
+
         self.connected = True
         self.started_at = time.time()
         self.upload_total = 0

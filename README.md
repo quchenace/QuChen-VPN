@@ -1,5 +1,7 @@
 # QuChen VPN
 
+> 版本：v1.0.1 · [下载](https://github.com/quchenace/QuChen-VPN/releases/latest)
+
 Windows 桌面代理客户端：聚合互联网公开的免费节点订阅源，自动测速去重，一键连接。
 界面参考 FlClash 类客户端的视觉语言，使用 **Python + WebView2 + mihomo 内核** 实现。
 

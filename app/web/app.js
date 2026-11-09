@@ -38,7 +38,7 @@ const fmtDur = (s) => {
   return `${h}:${m}:${ss}`;
 };
 const delayClass = (d) => (!d ? 'd-none' : d < 150 ? 'd-good' : d < 400 ? 'd-mid' : 'd-bad');
-const delayText = (d) => (!d ? '—' : d + ' ms');
+const delayText = (d) => (!d ? '待测速' : d + ' ms');
 
 function toast(msg, kind = 'ok') {
   const el = document.createElement('div');
@@ -334,6 +334,9 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': 
 /* ---------------------------------------------------------------- 节点表 */
 function filteredNodes() {
   return NODES.filter((n) => {
+    if (filterProto === 'secure' && (n.type === 'http' || n.type === 'socks5')) return false;
+    if (filterProto === 'plain' && !(n.type === 'http' || n.type === 'socks5')) return false;
+    if (filterProto === 'verified' && !n.delay) return false;
     if (filterCountry !== '全部' && n.country !== filterCountry) return false;
     if (searchText) {
       const q = searchText.toLowerCase();
@@ -347,9 +350,13 @@ function renderNodeTable() {
   const countries = {};
   NODES.forEach((n) => (countries[n.country] = (countries[n.country] || 0) + 1));
   const top = Object.entries(countries).sort((a, b) => b[1] - a[1]);
+  const protoChips = [['all', '全部'], ['secure', '加密线路'], ['plain', '公共代理'], ['verified', '已测速']]
+    .map(([k, label]) => `<button class="chip pchip ${filterProto === k ? 'active' : ''}" data-proto="${k}">${label}</button>`).join('');
   const chips = [['全部', NODES.length]].concat(top.slice(0, 12));
-  $('#countryChips').innerHTML = chips.map(([c, n]) =>
-    `<button class="chip ${c === filterCountry ? 'active' : ''}" data-country="${esc(c)}">${esc(c)} ${n}</button>`).join('');
+  $('#countryChips').innerHTML = protoChips +
+    `<span style="width:1px;background:var(--line-2);margin:0 4px"></span>` +
+    chips.map(([c, n]) =>
+      `<button class="chip ${c === filterCountry ? 'active' : ''}" data-country="${esc(c)}">${esc(c)} ${n}</button>`).join('');
 
   const rows = filteredNodes();
   const shown = rows.slice(0, 300);
@@ -409,11 +416,13 @@ function closeDrawer() {
 async function doToggle() {
   if (MOCK) { toast(STATE.connected ? '已断开' : '已连接'); STATE.connected = !STATE.connected; paint(); return; }
   if (STATE && STATE.task && STATE.task.running) { toast('任务进行中，请稍候', 'err'); return; }
+  const wasConnected = !!(STATE && STATE.connected);
   $('#btnConnect').classList.add('busy');
+  $('#connBtnText').textContent = wasConnected ? '正在断开…' : '正在连接…';
   try {
-    const r = STATE.connected ? await API.disconnect() : await API.connect();
+    const r = wasConnected ? await API.disconnect() : await API.connect();
     if (!r.ok) toast(r.msg || '操作失败', 'err');
-    else toast(STATE.connected ? '已断开连接' : '连接成功');
+    else toast(wasConnected ? '已断开连接' : '连接成功');
     const s = await API.state();
     STATE = s; paint();
   } catch (e) { toast('操作失败: ' + e, 'err'); }

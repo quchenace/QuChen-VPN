@@ -1,0 +1,73 @@
+name: build-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（如 v1.0.1），留空则用 tag"
+        required: false
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pywebview pythonnet requests pyyaml pillow pyinstaller
+
+      - name: Fetch mihomo core
+        shell: pwsh
+        run: |
+          $api = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
+          $rel = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "qc-ci" }
+          $asset = $rel.assets | Where-Object { $_.name -match "windows-amd64-compatible" -and $_.name -like "*.zip" } | Select-Object -First 1
+          if (-not $asset) { $asset = $rel.assets | Where-Object { $_.name -match "windows-amd64" -and $_.name -like "*.zip" } | Select-Object -First 1 }
+          Write-Host "downloading $($asset.name)"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile mihomo.zip
+          Expand-Archive mihomo.zip -DestinationPath mihomo_tmp -Force
+          New-Item -ItemType Directory -Force -Path runtime\core | Out-Null
+          $exe = Get-ChildItem mihomo_tmp -Filter *.exe | Select-Object -First 1
+          Copy-Item $exe.FullName runtime\core\mihomo.exe -Force
+          Write-Host "core: $($exe.Name) $([math]::Round($exe.Length/1MB,1)) MB"
+
+      - name: Fetch geo data
+        shell: pwsh
+        run: |
+          $base = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest"
+          Invoke-WebRequest -Uri "$base/geoip.metadb" -OutFile runtime\core\GEOIP.metadb
+          Invoke-WebRequest -Uri "$base/geosite.dat" -OutFile runtime\core\GEOSITE.dat
+          Get-ChildItem runtime\core | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: Build node pool
+        shell: pwsh
+        run: python tools\build_seed.py --keep 2500
+
+      - name: Build package
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File build.ps1
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version || github.ref_name }}
+          name: "QuChen VPN ${{ github.event.inputs.version || github.ref_name }}"
+          files: release/QuChenVPN-win64.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
