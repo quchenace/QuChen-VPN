@@ -100,7 +100,6 @@
       </nav>
 
       <div class="sidebar-foot">
-        <button class="nav-item" data-page="settings"><svg class="ic18"><use href="#i-user"/></svg><span>用户中心</span></button>
         <div class="ver">v<span id="verText">1.0.0</span></div>
       </div>
     </aside>
@@ -265,44 +264,7 @@
         <div class="diag-list" id="diagList"><div class="empty">点击“开始诊断”检查内核、端口、出口与系统代理状态。</div></div>
       </section>
 
-      <!-- 设置 / 用户中心 -->
-      <section class="page" id="page-settings">
-        <div class="page-head"><h1>用户中心</h1></div>
-        <div class="settings">
-          <div class="set-card">
-            <div class="set-title">启动</div>
-            <label class="switch-row"><span class="sw-label">开机自启</span><span class="sw-hint">登录系统后自动打开 QuChen VPN</span><span class="switch"><input type="checkbox" id="swAutoStart"><i></i></span></label>
-            <label class="switch-row"><span class="sw-label">启动后自动连接</span><span class="sw-hint">打开软件即连接上次使用的线路</span><span class="switch"><input type="checkbox" id="swAutoConnect"><i></i></span></label>
-          </div>
-          <div class="set-card">
-            <div class="set-title">网络</div>
-            <div class="kv"><span>本地代理端口</span><b id="kvPort">7890</b></div>
-            <div class="kv"><span>内核控制端口</span><b id="kvCtrl">—</b></div>
-            <div class="kv"><span>数据目录</span><b class="mono" id="kvHome">—</b><button class="link-btn" id="btnCopyHome">复制</button></div>
-            <div class="kv"><span>管理员权限</span><b id="kvAdmin">—</b></div>
-          </div>
-          <div class="set-card">
-            <div class="set-title">软件更新</div>
-            <div class="kv"><span>当前版本</span><b id="kvVer">1.0.0</b>
-              <button class="link-btn" id="btnCheckUpdate"><svg class="ic14"><use href="#i-refresh"/></svg>检查更新</button>
-            </div>
-            <div class="kv"><span>最新版本</span><b id="kvLatest">—</b></div>
-            <div class="kv"><span>状态</span><b id="kvUpdateMsg" style="font-weight:500;color:var(--text-2)">尚未检查</b></div>
-            <div class="update-box" id="updateBox">
-              <div class="update-bar"><i id="updateFill"></i></div>
-              <button class="btn-blue" id="btnDoUpdate">立即更新</button>
-            </div>
-            <div class="about-note" id="updateNotes"></div>
-          </div>
-          <div class="set-card">
-            <div class="set-title">关于</div>
-            <div class="kv"><span>客户端</span><b>QuChen VPN · mihomo Meta 内核</b></div>
-            <div class="kv"><span>节点来源</span><b>17 个公开免费订阅源</b></div>
-            <div class="kv"><span>代码仓库</span><b id="kvRepo">github.com/OWNER/QuChen-VPN</b></div>
-            <div class="about-note">本客户端仅聚合互联网上公开发布的免费节点，节点可用性由第三方维护者决定。请遵守当地法律法规使用。</div>
-          </div>
-        </div>
-      </section>
+      
 
       <!-- 关于 / 官网 -->
       <section class="page" id="page-about">
