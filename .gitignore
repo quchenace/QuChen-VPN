@@ -1,0 +1,28 @@
+# 参考界面所在目录（第三方客户端，不纳入仓库）
+guodong/
+
+# 构建产物
+dist/
+build/
+release/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 内核二进制与大文件（自行下载，见 README）
+runtime/
+tools/*.txt
+
+# 开发临时文件
+tools/testhome*/
+tools/seedhome*/
+tools/bootproxy*/
+tools/*.png
+tools/*.json
+tools/raw_*
+*.log
