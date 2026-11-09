@@ -193,7 +193,7 @@ function paint() {
   $('#kvCtrl').textContent = s.ctrl_port || '—';
   $('#kvAdmin').textContent = s.admin ? '已获得' : '未获得（TUN 需要）';
   $('#kvVer').textContent = s.version;
-  $('#swAutoStart').checked = !!s.auto_start;
+  const _sw = $('#swAutoStart'); if (_sw) _sw.checked = !!s.auto_start;
   $('#swAutoConnect').checked = !!s.auto_connect;
 
   // 任务条
@@ -243,7 +243,7 @@ function paintUpdate(u) {
   else if (u.downloading) btn.textContent = '下载中 ' + (u.progress || 0) + '%';
   else btn.textContent = '立即更新';
   // 设置页入口红点
-  const navBtn = $('.nav-item[data-page="settings"]');
+  const navBtn = null;
   if (navBtn) {
     let dot = navBtn.querySelector('.badge-dot');
     if (u.has_update && !dot) {
@@ -577,7 +577,7 @@ function bindEvents() {
   $('#btnCopyHome').onclick = async () => { await API.copy($('#kvHome').textContent); toast('已复制'); };
   $('#btnAbout').onclick = () => $('[data-page="about"]').click();
   $('#btnHelpHome').onclick = () => $('[data-page="diag"]').click();
-  $('#swAutoStart').onchange = async (e) => { await API.set_autostart(e.target.checked); toast(e.target.checked ? '已设置开机自启' : '已取消开机自启'); };
+  const _sw2 = $('#swAutoStart'); if (_sw2) _sw2.onchange = async (e) => { await API.set_autostart(e.target.checked); toast(e.target.checked ? '已设置开机自启' : '已取消开机自启'); };
   $('#swAutoConnect').onchange = async (e) => { await API.set_auto_connect(e.target.checked); toast('设置已保存'); };
   $('#btnCheckUpdate').onclick = () => checkUpdate(false);
   $('#btnDoUpdate').onclick = doUpdate;
