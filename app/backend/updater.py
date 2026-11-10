@@ -322,14 +322,14 @@ def apply_update(package: str, exe_name: str = "QuChenVPN.exe", on_stage=None) -
         names = set(os.listdir(src))
     except OSError:
         names = set()
-    is_full = bool(names & {"web", "backend", "app", "assets"}) or any(
-        os.path.isdir(os.path.join(src, n)) for n in names
-    )
-    mode = "/MIR" if is_full else "/E"
-    if not is_full and exe_name not in names:
+    if exe_name not in names:
         found = [n for n in names if n.lower().endswith(".exe")]
         if found:
             exe_name = found[0]
+    # A partial archive that happens to hold one folder (a new web/ only) must not get /MIR: that would
+    # delete runtime/, the exe and everything else. Full means the exe plus one of the runtime folders.
+    is_full = (exe_name in names and bool(names & {"web", "runtime", "backend"})) or {"web", "runtime"} <= names
+    mode = "/MIR" if is_full else "/E"
 
     backup = os.path.join(tempfile.gettempdir(), "QuChenVPN_backup")
     bat = os.path.join(tempfile.gettempdir(), "quchen_update.bat")
