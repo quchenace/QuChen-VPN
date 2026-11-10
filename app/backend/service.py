@@ -19,7 +19,7 @@ from . import sysproxy
 from . import updater
 
 APP_TITLE = "QuChen VPN"
-APP_VER = "1.0.6"
+APP_VER = "1.0.7"
 UPDATE_REPO = "quchenace/QuChen-VPN"
 
 
@@ -90,6 +90,7 @@ class Service:
             "theme": "light",
             "port": C.MIXED_PORT,
             "close_to_tray": True,
+            "update_token": "",          # 私有仓库拉取 Release 用（可选）
         }
         try:
             with open(self.settings_path, "r", encoding="utf-8") as f:
@@ -180,7 +181,9 @@ class Service:
             "total_up": (c.upload_total if alive else 0) + d.get("up", 0),
             "total_down": (c.download_total if alive else 0) + d.get("down", 0),
             "mode": self.settings.get("mode", "rule"),
-            "sys_proxy": bool(sysproxy.get_proxy().get("enable")) and alive,
+            "sys_proxy": bool(alive and c.mixed_port and
+                              sysproxy.proxy_effective(f"127.0.0.1:{c.mixed_port}")),
+            "sys_proxy_server": sysproxy.get_proxy().get("server", ""),
             "sys_proxy_setting": bool(self.settings.get("sys_proxy", True)),
             "tun": bool(self.settings.get("tun")),
             "mixed_port": c.mixed_port if alive else self.settings.get("port", C.MIXED_PORT),
@@ -196,6 +199,7 @@ class Service:
             "stats_days": sorted(self.stats.get("days", {}).items(), reverse=True)[:14],
             "stat_total": {"up": self.stats.get("total_up", 0), "down": self.stats.get("total_down", 0)},
             "update": dict(self.update),
+            "update_token_set": bool(self.settings.get("update_token")),
             "repo": UPDATE_REPO,
         }
 
@@ -206,20 +210,48 @@ class Service:
     def connect(self, node_name: str | None = None) -> dict:
         with self._lock:
             if self.core.alive():
-                return {"ok": True, "msg": "已连接"}
+                # 内核还在跑不代表代理真的生效：上次异常退出、用户手动关了系统代理、
+                # 或系统启用了 PAC 都会造成"显示已连接但没走代理"。这里必须重新核对。
+                if node_name:
+                    self.settings["node"] = node_name
+                    if self.core.select(C.GROUP_SELECT, node_name):
+                        self._log(f"[core] 已切换线路 {node_name}")
+                fixed = self._ensure_sysproxy()
+                self.save_settings()
+                if not fixed:
+                    return {"ok": False, "msg": "内核在运行，但系统代理接管失败",
+                            "node": self.core.current()}
+                ok_exit, detail = self._verify_exit()
+                msg = "已连接" if ok_exit else f"已连接，但出口未连通（{detail}）"
+                return {"ok": ok_exit, "msg": msg, "node": self.core.current()}
             if not self.nodes():
                 return {"ok": False, "msg": "节点池为空，请先更新线路"}
             if node_name:
                 self.settings["node"] = node_name
             self.task = {"running": True, "kind": "connect", "msg": "正在启动内核…", "progress": 10}
             try:
+                want_tun = bool(self.settings.get("tun"))
+                if want_tun and not sysproxy.is_admin():
+                    want_tun = False
+                    self._log("[core] 当前未以管理员身份运行，本次改用系统代理模式（TUN 已跳过）")
                 self.core.build(
                     self.nodes(), mode=self.settings.get("mode", "rule"),
-                    tun=bool(self.settings.get("tun")), prefer_port=self.settings.get("port"),
+                    tun=want_tun, prefer_port=self.settings.get("port"),
                 )
                 self.task["msg"] = "内核启动中…"
                 self.task["progress"] = 45
                 self.core.start()
+                self.task["msg"] = "等待内核端口就绪…"
+                if not self._wait_mixed(12.0):
+                    self._log("[core] 混合端口未就绪，重启内核一次")
+                    try:
+                        self.core.stop()
+                        time.sleep(0.6)
+                        self.core.start()
+                    except Exception as e:
+                        self._log(f"[core] 内核重启异常 {type(e).__name__}")
+                    if not self._wait_mixed(10.0):
+                        self._log("[core] 混合端口仍未就绪，代理可能无法使用")
                 self.task["progress"] = 70
                 target = self.settings.get("node")
                 if target and self.node_by_name(target) and self.node_by_name(target).get("delay"):
@@ -243,14 +275,46 @@ class Service:
                         else:
                             self.core.select(C.GROUP_SELECT, C.GROUP_AUTO)
                             self._log("[core] 暂未探到可用线路，交给自动选择组")
-                if self.settings.get("sys_proxy", True):
-                    sysproxy.set_proxy(True, f"127.0.0.1:{self.core.mixed_port}")
-                    self._log(f"[sys] 系统代理已开启 127.0.0.1:{self.core.mixed_port}")
+                proxy_ok = self._ensure_sysproxy()
+                if self.settings.get("sys_proxy", True) and not proxy_ok:
+                    self._log("[sys] 系统代理接管失败：可能被安全软件或组策略锁定")
                 self.settings["port"] = self.core.mixed_port
                 self.save_settings()
-                self.task = {"running": False, "kind": "connect", "msg": "连接成功", "progress": 100}
-                self._log("[core] 连接成功")
-                return {"ok": True, "msg": "连接成功", "node": self.core.current()}
+
+                self.task["msg"] = "正在校验出口连通性…"
+                self.task["progress"] = 90
+                ok_exit, detail = self._verify_exit()
+                if not ok_exit:
+                    self._log(f"[core] 出口校验失败（{detail}），尝试换线")
+                    alt = self._quick_pick(exclude=self.settings.get("node"))
+                    if alt:
+                        if self.core.select(C.GROUP_SELECT, alt):
+                            self.settings["node"] = alt
+                            self.save_settings()
+                            ok_exit, detail = self._verify_exit()
+                            self._log(f"[core] 切换到 {alt} 后{'校验通过' if ok_exit else '仍不通'}")
+
+                if not ok_exit:
+                    # 出口不通就不要继续占着系统代理，否则用户会觉得“连上了但整台电脑没网”
+                    try:
+                        sysproxy.set_proxy(False, f"127.0.0.1:{self.core.mixed_port}")
+                        self._log("[sys] 出口不可用，已还原系统代理")
+                    except Exception:
+                        pass
+                    proxy_ok = False
+                if ok_exit and proxy_ok:
+                    msg = "连接成功"
+                elif ok_exit and not proxy_ok:
+                    msg = "内核已就绪，但系统代理未接管"
+                elif not ok_exit:
+                    msg = f"已启动内核，但出口未连通（{detail}）"
+                else:
+                    msg = "连接成功"
+                self.task = {"running": False, "kind": "connect", "msg": msg,
+                             "progress": 100 if ok_exit else 85}
+                self._log(f"[core] {msg}")
+                return {"ok": bool(ok_exit), "msg": msg, "node": self.core.current(),
+                        "sys_proxy": proxy_ok, "verified": ok_exit}
             except Exception as e:
                 self.task = {"running": False, "kind": "connect", "msg": f"连接失败: {e}", "progress": 0}
                 self._log(f"[core] 连接失败 {e}")
@@ -297,14 +361,14 @@ class Service:
                     progress(done, total)
         return out
 
-    def _quick_pick(self, limit=180, timeout=3500):
+    def _quick_pick(self, limit=180, timeout=3500, exclude: str = ""):
         """没有已测速节点时，快速探测前若干候选，返回第一个可用的。"""
         if not self.core.alive():
             return ""
         nodes = self.nodes()
         prefer = [n for n in nodes if n.get("type") not in ("http", "socks5")] + \
                  [n for n in nodes if n.get("type") in ("http", "socks5")]
-        names = [n["name"] for n in prefer[:limit]]
+        names = [n["name"] for n in prefer[:limit] if n["name"] != exclude]
         import concurrent.futures as cf
         for i in range(0, len(names), 36):
             batch = names[i:i + 36]
@@ -320,12 +384,77 @@ class Service:
                         return futs[f]
         return ""
 
+    def _wait_mixed(self, timeout=12.0) -> bool:
+        """等待内核的混合代理端口真正进入监听状态。"""
+        port = self.core.mixed_port
+        if not port:
+            return False
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=1.0):
+                    return True
+            except OSError:
+                if not self.core.alive():
+                    return False
+                time.sleep(0.25)
+        return False
+
+    # ------------------------------------------------------------ 代理生效校验
+    def _ensure_sysproxy(self) -> bool:
+        """确保系统代理指向当前内核端口；返回是否真正生效。"""
+        if not self.settings.get("sys_proxy", True):
+            return True
+        port = self.core.mixed_port
+        if not port:
+            return False
+        server = f"127.0.0.1:{port}"
+        if sysproxy.proxy_effective(server):
+            return True
+        ok = sysproxy.set_proxy(True, server)
+        self._log(f"[sys] 系统代理{'已接管 ' if ok else '接管失败 '}{server}")
+        return ok
+
+    def _verify_exit(self, timeout=8, rounds=2) -> tuple:
+        """通过本地混合端口做出口探测，判断代理是否真的能用（多轮重试）。"""
+        port = self.core.mixed_port
+        if not port:
+            return False, "内核端口未知"
+        px = {"http": f"http://127.0.0.1:{port}", "https": f"http://127.0.0.1:{port}"}
+        last = ""
+        for rnd in range(max(1, rounds)):
+            ok, detail = self._verify_once(px, timeout)
+            if ok:
+                return True, detail
+            last = detail
+            if rnd + 1 < rounds:
+                time.sleep(1.0)
+        return False, last or "无响应"
+
+    def _verify_once(self, px, timeout=8) -> tuple:
+        last = ""
+        sess = requests.Session()
+        sess.trust_env = False          # 只用内核端口，别被系统里的坏代理干扰
+        for url in ("https://www.gstatic.com/generate_204",
+                    "http://connectivitycheck.platform.hicloud.com/generate_204",
+                    "https://cp.cloudflare.com/generate_204"):
+            try:
+                r = sess.get(url, proxies=px, timeout=timeout, allow_redirects=False)
+                if r.status_code in (200, 204):
+                    return True, f"HTTP {r.status_code}"
+                last = f"HTTP {r.status_code}"
+            except Exception as e:
+                last = type(e).__name__
+        return False, last or "无响应"
+
     def disconnect(self) -> dict:
         with self._lock:
+            port = self.core.mixed_port
             try:
-                if self.settings.get("sys_proxy", True):
-                    sysproxy.set_proxy(False, f"127.0.0.1:{self.core.mixed_port or 0}")
-                    self._log("[sys] 系统代理已关闭")
+                # 先还原系统代理再停内核，否则端口信息丢失后无法判断是否为自身写入
+                if self.settings.get("sys_proxy", True) or sysproxy.has_backup():
+                    sysproxy.set_proxy(False, f"127.0.0.1:{port}" if port else "")
+                    self._log("[sys] 系统代理已还原")
             except Exception:
                 pass
             self.core.stop()
@@ -349,7 +478,15 @@ class Service:
         self.settings["sys_proxy"] = bool(on)
         self.save_settings()
         if self.core.alive():
-            sysproxy.set_proxy(bool(on), f"127.0.0.1:{self.core.mixed_port}")
+            if on:
+                ok = sysproxy.set_proxy(True, f"127.0.0.1:{self.core.mixed_port}")
+                self._log(f"[sys] 系统代理{'已开启' if ok else '开启失败'}")
+                return {"ok": ok, "msg": "" if ok else "系统代理写入失败，可能被安全软件拦截"}
+            sysproxy.set_proxy(False, f"127.0.0.1:{self.core.mixed_port}")
+            self._log("[sys] 系统代理已还原")
+        elif not on:
+            # 内核没在跑也要确保不留下我们写入的代理
+            sysproxy.restore_proxy()
         return {"ok": True}
 
     def set_tun(self, on: bool) -> dict:
@@ -477,7 +614,9 @@ class Service:
                 step(f"合并 {len(nodes_raw)} 条线路")
                 if len(nodes_raw) < 10:
                     raise RuntimeError("订阅源全部不可达，请检查网络")
-                cand = P.diversify(nodes_raw, limit=8000, per_country=600, per_host=10,
+                # 放宽同域名/同国家抽样上限：原来限制过紧，订阅里大量节点会被丢掉，
+                # 造成"节点库显示不全"。
+                cand = P.diversify(nodes_raw, limit=12000, per_country=900, per_host=30,
                                    prefer=["香港", "台湾", "日本", "新加坡", "美国", "韩国"],
                                    max_plain_ratio=0.35)
                 step(f"抽样 {len(cand)} 条进入预筛")
@@ -488,9 +627,9 @@ class Service:
                 reach = P.tcp_prefilter(cand, logger=step)
                 self.task["progress"] = 55
                 alive = P.verify(self.core_exe, self.home, reach, timeout_ms=6000,
-                                 keep=1200, logger=step, batch=400)
+                                 keep=1800, logger=step, batch=400)
                 self.task["progress"] = 85
-                merged = P.merge_pool(alive, reach, total=1500, max_plain_ratio=0.42)
+                merged = P.merge_pool(alive, reach, total=2500, max_plain_ratio=0.42)
                 clean = [{k: v for k, v in p.items() if not k.startswith("_")} for p in merged]
                 if clean:
                     self.pool = P.save(self.pool_path, clean, meta={
@@ -545,7 +684,17 @@ class Service:
         else:
             add("本地端口", False, "内核未启动")
         p = sysproxy.get_proxy()
-        add("系统代理", p.get("enable"), (p.get("server") or "未设置"))
+        if alive and p.get("pac"):
+            add("系统代理", False, f"系统启用了 PAC 自动脚本（{p.get('pac')[:60]}），会覆盖手动代理")
+        elif alive and port:
+            ok = sysproxy.proxy_effective(f"127.0.0.1:{port}")
+            add("系统代理", ok, (p.get("server") or "未设置") +
+                ("（已指向本机）" if ok else "（未指向本机端口）"))
+        else:
+            add("系统代理", p.get("enable"), (p.get("server") or "未设置"))
+        has_bk = sysproxy.has_backup()
+        add("代理配置备份", has_bk, "接管前的系统代理已记录，断开时自动还原" if has_bk else "当前未接管系统代理")
+
         add("节点数量", len(self.nodes()) > 0, f"{len(self.nodes())} 条")
         return {"items": items}
 
@@ -561,14 +710,26 @@ class Service:
             return self.update
         self.update.update({"checking": True, "msg": "正在检查更新…"})
         try:
-            res = updater.check(repo=UPDATE_REPO, current=APP_VER, proxies=self._proxies())
+            # 先直连（GitHub API 直连失败时 updater 内部还会走镜像），
+            # 仍失败且本地内核在跑时再借代理重试一次。
+            token = (self.settings.get("update_token") or "").strip() or None
+            res = updater.check(repo=UPDATE_REPO, current=APP_VER, proxies=None, token=token)
+            if not res.get("ok"):
+                px = self._proxies()
+                if px:
+                    res2 = updater.check(repo=UPDATE_REPO, current=APP_VER, proxies=px, token=token)
+                    if res2.get("ok"):
+                        res = res2
             res["checking"] = False
             res["checked_at"] = time.strftime("%H:%M:%S")
-            self.update = res
+            # 合并而非整体覆盖：否则刚下载好的 ready/progress 会被清空，导致"更新页点不动"
+            self.update.update(res)
             if res.get("ok"):
                 self._log(f"[update] {res.get('msg')} (当前 {APP_VER} / 最新 {res.get('latest')})")
+            else:
+                self._log(f"[update] 检查失败：{res.get('msg')}")
         except Exception as e:
-            self.update = {"ok": False, "checking": False, "msg": f"检查失败: {e}", "has_update": False}
+            self.update.update({"ok": False, "checking": False, "msg": f"检查失败: {e}"})
         return self.update
 
     def download_update(self) -> dict:
@@ -582,16 +743,30 @@ class Service:
 
         def run():
             try:
-                dest = os.path.join(self.home, "update", self.update.get("asset_name") or "update.zip")
-                updater.download(url, dest, progress=lambda p: self.update.update({"progress": p}),
-                                 proxies=self._proxies())
+                up_dir = os.path.join(self.home, "update")
+                os.makedirs(up_dir, exist_ok=True)
+                # 先清掉上一次的残留包，避免旧包被当成新包安装
+                for name in os.listdir(up_dir):
+                    if name.lower().endswith((".zip", ".part", ".exe")):
+                        try:
+                            os.remove(os.path.join(up_dir, name))
+                        except Exception:
+                            pass
+                dest = os.path.join(up_dir, self.update.get("asset_name") or "update.zip")
+                self.update.update({"msg": "正在下载更新包…", "progress": 0})
+                updater.download(url, dest,
+                                 progress=lambda p: self.update.update({"progress": p}),
+                                 proxies=None,
+                                 expect_size=int(self.update.get("asset_size") or 0))
                 self._log(f"[update] 下载完成 {dest}")
                 self.update["downloading"] = False
                 self.update["progress"] = 100
                 self.update["ready"] = dest
-                self.update["msg"] = "更新包已就绪，即将重启安装"
+                self.update["msg"] = "更新包已就绪，点击「重启并安装」"
             except Exception as e:
                 self.update["downloading"] = False
+                self.update["progress"] = 0
+                self.update["ready"] = ""
                 self.update["msg"] = f"下载失败: {e}"
                 self._log(f"[update] 下载失败 {e}")
 
@@ -601,17 +776,37 @@ class Service:
     def install_update(self) -> dict:
         pkg = self.update.get("ready")
         if not pkg or not os.path.exists(pkg):
-            return {"ok": False, "msg": "更新包不存在"}
+            return {"ok": False, "msg": "更新包不存在，请重新下载"}
+        if not pkg.lower().endswith(".zip"):
+            return {"ok": False, "msg": "更新包格式异常，请重新下载"}
         exe = os.path.basename(sys.executable) if getattr(sys, "frozen", False) else "QuChenVPN.exe"
         try:
+            # 替换前先释放系统代理并停内核，否则 mihomo 等文件被占用会导致覆盖失败
+            try:
+                self.disconnect()
+            except Exception:
+                pass
+            try:
+                self.core.stop()
+            except Exception:
+                pass
             updater.apply_update(pkg, exe_name=exe)
-            self._log("[update] 已启动替换脚本，程序即将退出")
+            self._log("[update] 已启动替换脚本（先清理旧文件再写入，失败自动回滚），程序即将退出")
             return {"ok": True}
         except Exception as e:
+            self._log(f"[update] 安装失败 {e}")
             return {"ok": False, "msg": f"安装失败: {e}"}
 
     def update_info(self) -> dict:
         return dict(self.update)
+
+    def set_update_token(self, token: str) -> dict:
+        """保存 GitHub Token（仅本地存储，用于访问私有仓库的 Release）。"""
+        token = (token or "").strip()
+        self.settings["update_token"] = token
+        self.save_settings()
+        self._log("[update] 已保存仓库 Token" if token else "[update] 已清除仓库 Token")
+        return {"ok": True, "msg": "已保存" if token else "已清除", "set": bool(token)}
 
     # ------------------------------------------------------------ 统计
     def tick_stats(self):
@@ -636,5 +831,10 @@ class Service:
             self.flush_stats()
             if self.core.alive():
                 self.disconnect()
+        except Exception:
+            pass
+        try:
+            # 兜底还原：内核已死或异常退出时也要把自己的系统代理设置摘除
+            sysproxy.restore_proxy()
         except Exception:
             pass

@@ -1,6 +1,6 @@
 ; QuChen VPN —— Inno Setup 脚本（由 CI 调用）
 #define MyAppName "QuChen VPN"
-#define MyAppVersion "1.0.2"
+#define MyAppVersion "1.0.7"
 #define MyAppExe "QuChenVPN.exe"
 
 [Setup]

@@ -3,12 +3,20 @@
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+// 设置入口：用于显示更新红点（此前未定义，paintUpdate 会在此抛 ReferenceError）
+const navBtn = document.querySelector('.nav-item[data-page="settings"]');
 
 let API = null;
 let STATE = null;
 let NODES = [];
 let MOCK = false;
+let filterProto = 'all';
 let filterCountry = '全部';
+let nodeLimit = 120;
+const G_SELECT = '🚀 节点选择';
+const G_AUTO = '♻️ 自动选择';
+const G_FALLBACK = '🔯 故障转移';
+let drawerLimit = 200;
 let searchText = '';
 let drawerTab = 'all';
 let drawerSearch = '';
@@ -115,8 +123,10 @@ async function boot() {
     const data = await API.bootstrap();
     STATE = data.state;
     NODES = data.nodes || [];
-    if (data.home) $('#kvHome').textContent = data.home;
-    if (data.state && data.state.repo) $('#kvRepo').textContent = 'github.com/' + data.state.repo;
+    const _kvHome = $('#kvHome');
+    if (data.home && _kvHome) _kvHome.textContent = data.home;
+    const _kvRepo = $('#kvRepo');
+    if (data.state && data.state.repo && _kvRepo) _kvRepo.textContent = 'github.com/' + data.state.repo;
     paint();
     startPolling();
     setTimeout(() => checkUpdate(true), 2500);
@@ -144,6 +154,7 @@ async function tick() {
 function paint() {
   const s = STATE;
   if (!s) return;
+  try { watchConnect(s); } catch (e) { /* ignore */ }
 
   $('#verText').textContent = s.version;
   $$('.ver-inline').forEach((e) => (e.textContent = s.version));
@@ -194,10 +205,11 @@ function paint() {
   // 节点池
   $('#poolFootText').textContent =
     `已加载 ${s.node_count} 条线路 · 更新于 ${s.pool_updated || '未知'}`;
-  $('#kvPort').textContent = s.mixed_port || '—';
-  $('#kvCtrl').textContent = s.ctrl_port || '—';
-  $('#kvAdmin').textContent = s.admin ? '已获得' : '未获得（TUN 需要）';
-  $('#kvVer').textContent = s.version;
+  const _setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  _setTxt('kvPort', s.mixed_port || '—');
+  _setTxt('kvCtrl', s.ctrl_port || '—');
+  _setTxt('kvAdmin', s.admin ? '已获得' : '未获得（TUN 需要）');
+  _setTxt('kvVer', s.version || '—');
   const _sw = $('#swAutoStart'); if (_sw) _sw.checked = !!s.auto_start;
   $('#swAutoConnect').checked = !!s.auto_connect;
 
@@ -257,21 +269,30 @@ function forceUpdateGate(u) {
 function paintUpdate(u) {
   forceUpdateGate(u);
   if (!u) return;
-  if (u.latest) $('#kvLatest').textContent = u.latest;
-  $('#kvUpdateMsg').textContent = u.msg || '尚未检查';
-  if (u.has_update) {
-    $('#kvUpdateMsg').style.color = 'var(--blue)';
-    $('#kvUpdateMsg').textContent = u.msg || ('发现新版本 ' + u.latest);
+  const _kvLatest = $('#kvLatest');
+  if (u.latest && _kvLatest) _kvLatest.textContent = u.latest;
+  const _msg = $('#kvUpdateMsg');
+  if (_msg) {
+    _msg.textContent = u.msg || '尚未检查';
+    if (u.has_update) {
+      _msg.style.color = 'var(--blue)';
+      _msg.textContent = u.msg || ('发现新版本 ' + u.latest);
+    } else {
+      _msg.style.color = '';
+    }
   }
-  if (u.notes) $('#updateNotes').textContent = u.notes;
+  const _notes = $('#updateNotes');
+  if (_notes) _notes.textContent = u.notes || '';
   const box = $('#updateBox');
-  const show = !!(u.has_update || u.downloading || u.ready);
-  box.classList.toggle('show', show);
-  $('#updateFill').style.width = (u.progress || 0) + '%';
+  if (box) box.classList.toggle('show', !!(u.has_update || u.downloading || u.ready));
+  const _fill = $('#updateFill');
+  if (_fill) _fill.style.width = (u.progress || 0) + '%';
   const btn = $('#btnDoUpdate');
-  if (u.ready) btn.textContent = '重启并安装';
-  else if (u.downloading) btn.textContent = '下载中 ' + (u.progress || 0) + '%';
-  else btn.textContent = '立即更新';
+  if (btn) {
+    if (u.ready) btn.textContent = '重启并安装';
+    else if (u.downloading) btn.textContent = '下载中 ' + (u.progress || 0) + '%';
+    else btn.textContent = '立即更新';
+  }
   // 设置页入口红点
   if (navBtn) {
     let dot = navBtn.querySelector('.badge-dot');
@@ -290,7 +311,7 @@ async function checkUpdate(silent) {
     if (!silent) {
       toast(r.msg || '检查完成', r.has_update ? 'ok' : 'ok');
     } else if (r && r.has_update) {
-      toast('发现新版本 ' + r.latest + '，可在用户中心更新');
+      toast('发现新版本 ' + r.latest + '，可到「设置」页更新');
     }
   } catch (e) {
     if (!silent) toast('检查失败: ' + e, 'err');
@@ -388,10 +409,11 @@ function renderNodeTable() {
       `<button class="chip ${c === filterCountry ? 'active' : ''}" data-country="${esc(c)}">${esc(c)} ${n}</button>`).join('');
 
   const rows = filteredNodes();
-  const shown = rows.slice(0, 300);
+  const shown = rows.slice(0, nodeLimit);
+  const rest = rows.length - shown.length;
   const cur = STATE ? STATE.node : '';
   $('#nodeTable').innerHTML = `
-    <div class="trow head"><div></div><div>节点${rows.length > 300 ? `（共 ${rows.length} 条，显示前 300）` : ''}</div><div>协议</div><div>延迟</div><div>操作</div></div>` +
+    <div class="trow head"><div></div><div>节点（共 ${rows.length} 条${rest > 0 ? `，已显示 ${shown.length}` : ''}）</div><div>协议</div><div>延迟</div><div>操作</div></div>` +
     (shown.length ? shown.map((n) => `
       <div class="trow">
         <div class="tflag">${flagSvg(n.country)}</div>
@@ -402,7 +424,11 @@ function renderNodeTable() {
           ? '<button class="pick used">使用中</button>'
           : `<button class="pick" data-use="${esc(n.name)}">使用</button>`}</div>
       </div>`).join('')
-      : '<div class="empty">没有匹配的节点</div>');
+      : '<div class="empty">没有匹配的节点</div>') +
+    (rest > 0 ? `<div style="display:flex;gap:8px;justify-content:center;padding:12px 0">
+        <button class="pick" data-more="120">再显示 120 条（还剩 ${rest}）</button>
+        <button class="pick" data-more="all">显示全部 ${rows.length} 条</button>
+      </div>` : '');
 }
 
 /* ---------------------------------------------------------------- 抽屉 */
@@ -417,21 +443,36 @@ function drawerNodes() {
 
 function renderDrawer() {
   const cur = STATE ? STATE.node : '';
-  $('#dcName').textContent = cur || '未选择';
+  $('#dcName').textContent = drawerTab === 'auto'
+    ? '自动选择 · 按延迟自动切换'
+    : drawerTab === 'fallback'
+      ? '故障转移 · 主线路失败自动换'
+      : (cur || '未选择');
   $$('#drawerTabs .dtab').forEach((b) => b.classList.toggle('active', b.dataset.tab === drawerTab));
   const list = drawerNodes();
-  $('#drawerList').innerHTML = list.slice(0, 800).map((n) => `
+  const shownList = list.slice(0, drawerLimit);
+  const rest = list.length - shownList.length;
+  const html = shownList.map((n) => `
     <button class="dnode ${(pendingNode || cur) === n.name ? 'on' : ''}" data-node="${esc(n.name)}">
       <span class="radio"></span>
       ${flagSvg(n.country, 'flag dflag')}
       <span class="dnode-name">${esc(stripFlag(n.name))}</span>
       <span class="dnode-type">${esc(n.type)}</span>
       <span class="dnode-delay ${delayClass(n.delay)}">${delayText(n.delay)}</span>
-    </button>`).join('') || '<div class="empty">没有匹配节点</div>';
+    </button>`).join('');
+  $('#drawerList').innerHTML = html
+    ? html + (rest > 0
+      ? `<button class="dnode" data-dmore="300" style="justify-content:center;color:var(--blue)">
+           加载更多（还剩 ${rest} 条，共 ${list.length} 条）</button>`
+      : '')
+    : '<div class="empty">没有匹配节点</div>';
 }
 
 function openDrawer() {
   pendingNode = STATE ? STATE.node : null;
+  drawerLimit = 200;
+  drawerSearch = '';
+  const srch = $('#drawerSearch'); if (srch) srch.value = '';
   renderDrawer();
   $('#drawer').classList.add('show');
   $('#drawerMask').classList.add('show');
@@ -442,6 +483,20 @@ function closeDrawer() {
 }
 
 /* ---------------------------------------------------------------- 动作 */
+let prevConnected = null;
+function watchConnect(painted) {
+  const now = !!(painted && painted.connected);
+  if (prevConnected === null) { prevConnected = now; return; }
+  if (now === prevConnected) return;
+  prevConnected = now;
+  if (now) {
+    if (painted.sys_proxy_setting && !painted.sys_proxy) toast('已连接，但系统代理未接管，请到设置检查', 'err');
+    else toast('连接成功');
+  } else {
+    toast('已断开连接');
+  }
+}
+
 async function doToggle() {
   if (MOCK) { toast(STATE.connected ? '已断开' : '已连接'); STATE.connected = !STATE.connected; paint(); return; }
   if (STATE && STATE.task && STATE.task.running) { toast('任务进行中，请稍候', 'err'); return; }
@@ -451,7 +506,10 @@ async function doToggle() {
   try {
     const r = wasConnected ? await API.disconnect() : await API.connect();
     if (!r.ok) toast(r.msg || '操作失败', 'err');
-    else toast(wasConnected ? '已断开连接' : '连接成功');
+    else if (r.pending) toast(r.msg || (wasConnected ? '正在断开…' : '正在连接，请稍候…'));
+    else if (wasConnected) toast('已断开连接');
+    else if (r.sys_proxy === false && STATE && STATE.sys_proxy_setting) toast('已连接，但系统代理未接管，请到设置检查', 'err');
+    else toast('连接成功');
     const s = await API.state();
     STATE = s; paint();
   } catch (e) { toast('操作失败: ' + e, 'err'); }
@@ -558,8 +616,26 @@ function bindEvents() {
   $('#btnPickNode').onclick = openDrawer;
   $('#drawerClose').onclick = closeDrawer;
   $('#drawerMask').onclick = closeDrawer;
-  $('#drawerSearch').oninput = (e) => { drawerSearch = e.target.value.trim(); renderDrawer(); };
+  $('#drawerSearch').oninput = (e) => { drawerSearch = e.target.value.trim(); drawerLimit = 200; renderDrawer(); };
+  $$('#drawerTabs .dtab').forEach((b) => {
+    b.onclick = async () => {
+      drawerTab = b.dataset.tab;
+      drawerLimit = 200;
+      renderDrawer();
+      if (drawerTab === 'all') return;
+      const target = drawerTab === 'auto' ? G_AUTO : G_FALLBACK;
+      const r = await API.set_group(G_SELECT, target);
+      if (r && r.ok) toast(drawerTab === 'auto' ? '已切换为自动选择' : '已切换为故障转移');
+      else toast(r && r.msg ? r.msg : '切换失败，请先连接', 'err');
+    };
+  });
   $('#drawerList').onclick = (e) => {
+    const more = e.target.closest('[data-dmore]');
+    if (more) {
+      drawerLimit += Number(more.dataset.dmore || 300);
+      renderDrawer();
+      return;
+    }
     const b = e.target.closest('.dnode');
     if (!b) return;
     pendingNode = b.dataset.node;
@@ -572,14 +648,24 @@ function bindEvents() {
   $('#drawerTest').onclick = testAll;
   $('#drawerRefresh').onclick = refreshPool;
 
-  $('#nodeSearch').oninput = (e) => { searchText = e.target.value.trim(); renderNodeTable(); };
+  $('#nodeSearch').oninput = (e) => { searchText = e.target.value.trim(); nodeLimit = 120; renderNodeTable(); };
   $('#countryChips').onclick = (e) => {
     const c = e.target.closest('.chip');
     if (!c) return;
-    filterCountry = c.dataset.country;
+    if (c.dataset.proto) filterProto = c.dataset.proto;
+    else filterCountry = c.dataset.country;
+    nodeLimit = 120;
     renderNodeTable();
   };
   $('#nodeTable').onclick = (e) => {
+    const more = e.target.closest('[data-more]');
+    if (more) {
+      nodeLimit = more.dataset.more === 'all'
+        ? filteredNodes().length
+        : nodeLimit + Number(more.dataset.more || 120);
+      renderNodeTable();
+      return;
+    }
     const b = e.target.closest('[data-use]');
     if (b) selectNode(b.dataset.use);
   };
@@ -599,17 +685,32 @@ function bindEvents() {
   };
   $('#btnClearLogs').onclick = () => { $('#logBox').textContent = ''; };
   $('#btnCopyDomain').onclick = async () => {
-    const txt = $('#kvHome').textContent;
-    await API.copy(txt);
+    const el = $('#kvHome');
+    await API.copy(el ? el.textContent : '');
     toast('已复制数据目录');
   };
-  $('#btnCopyHome').onclick = async () => { await API.copy($('#kvHome').textContent); toast('已复制'); };
+  const _btnCopyHome = $('#btnCopyHome');
+  if (_btnCopyHome) _btnCopyHome.onclick = async () => {
+    const el = $('#kvHome');
+    await API.copy(el ? el.textContent : '');
+    toast('已复制数据目录');
+  };
   $('#btnAbout').onclick = () => $('[data-page="about"]').click();
   $('#btnHelpHome').onclick = () => $('[data-page="diag"]').click();
   const _sw2 = $('#swAutoStart'); if (_sw2) _sw2.onchange = async (e) => { await API.set_autostart(e.target.checked); toast(e.target.checked ? '已设置开机自启' : '已取消开机自启'); };
   $('#swAutoConnect').onchange = async (e) => { await API.set_auto_connect(e.target.checked); toast('设置已保存'); };
-  $('#btnCheckUpdate').onclick = () => checkUpdate(false);
-  $('#btnDoUpdate').onclick = doUpdate;
+  const _btnCheckUpdate = $('#btnCheckUpdate');
+  if (_btnCheckUpdate) _btnCheckUpdate.onclick = () => checkUpdate(false);
+  const _btnDoUpdate = $('#btnDoUpdate');
+  if (_btnDoUpdate) _btnDoUpdate.onclick = doUpdate;
+  const _btnSaveToken = $('#btnSaveToken');
+  if (_btnSaveToken) _btnSaveToken.onclick = async () => {
+    const inp = $('#inpToken');
+    const r = await API.set_update_token((inp && inp.value) || '');
+    toast(r && r.ok ? (r.msg || '已保存') : ((r && r.msg) || '保存失败'), r && r.ok ? 'ok' : 'err');
+    if (inp) inp.value = '';
+    API.check_update(true).then(paintUpdate).catch(() => {});
+  };
   $('#btnReloadTraffic').onclick = () => tick();
   document.addEventListener('click', (e) => {
     const b = e.target.closest('[data-open]');

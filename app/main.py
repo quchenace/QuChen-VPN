@@ -62,7 +62,19 @@ class Api:
 
     # -------------------------------------------------- 连接
     def connect(self):
-        return self.svc.connect()
+        """后台线程执行连接，立即返回，前端靠 state 轮询看进度（避免界面卡死）。"""
+        if self.svc.task.get("running"):
+            return {"ok": True, "pending": True, "msg": "任务进行中，请稍候"}
+        svc = self.svc
+
+        def _run():
+            try:
+                svc.connect()
+            except Exception as e:
+                svc._log(f"[core] 连接异常 {type(e).__name__}: {e}")
+                svc.task = {"running": False, "kind": "connect", "msg": "连接失败", "progress": 0}
+        threading.Thread(target=_run, daemon=True).start()
+        return {"ok": True, "pending": True, "msg": "正在连接…"}
 
     def disconnect(self):
         return self.svc.disconnect()
@@ -116,6 +128,9 @@ class Api:
         if r.get("ok"):
             threading.Timer(1.2, lambda: self.window.destroy()).start()
         return r
+
+    def set_update_token(self, token):
+        return self.svc.set_update_token(token)
 
     def update_info(self):
         return self.svc.update_info()

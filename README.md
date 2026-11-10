@@ -1,6 +1,6 @@
 # QuChen VPN
 
-> 版本：v1.0.1 · [下载](https://github.com/quchenace/QuChen-VPN/releases/latest)
+> 版本：v1.0.7 · [下载](https://github.com/quchenace/QuChen-VPN/releases/latest)
 
 Windows 桌面代理客户端：聚合互联网公开的免费节点订阅源，自动测速去重，一键连接。
 界面参考 FlClash 类客户端的视觉语言，使用 **Python + WebView2 + mihomo 内核** 实现。
@@ -61,7 +61,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 客户端启动后调用 `https://api.github.com/repos/<owner>/QuChen-VPN/releases/latest`：
 
 1. 比较 `tag_name` 与内置版本号（语义化版本）
-2. 有新版本时在「用户中心 → 软件更新」显示，点击下载对应 `QuChenVPN-win64.zip`
+2. 有新版本时在「设置 → 软件更新」显示，点击下载对应 `QuChenVPN-win64.zip`
 3. 下载完成后生成替换脚本：等待主进程退出 → robocopy 覆盖安装目录 → 重启新版本
 
 发布新版本只需：修改 `APP_VER` → 打包 → 建 tag（如 `v1.0.1`）→ 上传 `QuChenVPN-win64.zip` 到 Release。
@@ -70,3 +70,15 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 
 节点全部来自互联网公开分享，客户端只做聚合与测速，不提供任何节点托管服务。
 可用性由第三方维护者决定，请遵守所在地区法律法规，自行承担使用风险。
+
+## 更新日志
+
+### v1.0.7
+- 修复：连接后实际未生效。连接流程改为后台执行，等待混合端口真正监听，接管系统代理后回读校验，并对出口做多轮连通性探测；出口不通时自动换线，仍不通则还原系统代理，避免“显示已连接但整台电脑没网”
+- 修复：系统代理接管时残留 PAC 脚本导致规则绕过；接管/还原均做回读校验，退出时不再误还原他人代理
+- 修复：TUN 模式在非管理员下直接失败，现自动降级为系统代理模式并记录原因
+- 修复：设置里的「用户中心」文案已改为「设置」
+- 修复：节点库只渲染部分节点。列表改为增量渲染（首批 120 条 + 加载更多），抽屉首批 200 条，搜索与标签筛选不再截断
+- 修复：检查更新在网络环境异常时必定报网络错误。改为直连优先、失败再回退系统代理与镜像；只选 .zip 便携包作为更新源；错误信息区分私有仓库/无 Release
+- 修复：更新后设置丢失。替换前完整备份，写入时排除 data、logs 与 settings.json，失败自动回滚
+- 新增：设置页可填写仓库 Token，私有仓库也能检查更新
