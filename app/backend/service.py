@@ -19,7 +19,7 @@ from . import sysproxy
 from . import updater
 
 APP_TITLE = "QuChen VPN"
-APP_VER = "1.0.8"
+APP_VER = "1.0.9"
 UPDATE_REPO = "quchenace/QuChen-VPN"
 
 
@@ -260,6 +260,18 @@ class Service:
                     ok = self.core.select(C.GROUP_SELECT, target)
                     if not ok:
                         self._log(f"[core] 节点选择失败 {target}")
+                    else:
+                        # A saved node can be a 900 ms one while a 120 ms one sits in the pool: a download
+                        # then crawls. Switch only when the faster node is clearly better, so a near-tie
+                        # does not churn between nodes on every connect.
+                        chosen = self.node_by_name(target) or {}
+                        fastest = self._fastest()
+                        if fastest and fastest != target:
+                            rival = self.node_by_name(fastest) or {}
+                            if int(rival.get("delay") or 9999) + 150 < int(chosen.get("delay") or 9999):
+                                if self.core.select(C.GROUP_SELECT, fastest):
+                                    self.settings["node"] = fastest
+                                    self._log(f"[core] {target} 延迟 {chosen.get('delay')}ms，换到更快的 {fastest} {rival.get('delay')}ms")
                 else:
                     # 优先选已知延迟最低的节点，否则现场快速探测
                     best = self._fastest()
@@ -327,7 +339,9 @@ class Service:
                 return {"ok": False, "msg": f"连接失败: {e}"}
 
     def _fastest(self):
-        nodes = [n for n in self.nodes() if isinstance(n.get("delay"), int)]
+        # Only a real, sane latency counts: a stale 0/None or a 20-second "alive" would be picked first and
+        # make every download crawl.
+        nodes = [n for n in self.nodes() if isinstance(n.get("delay"), int) and 0 < n["delay"] <= 3000]
         if not nodes:
             return ""
         nodes.sort(key=lambda n: n.get("delay", 9999))
@@ -363,8 +377,13 @@ class Service:
                     progress(done, total)
         return out
 
-    def _quick_pick(self, limit=180, timeout=3500, exclude: str = ""):
-        """没有已测速节点时，快速探测前若干候选，返回第一个可用的。"""
+    def _quick_pick(self, limit=240, timeout=3500, exclude: str = ""):
+        """没有已测速节点时快速探测，返回这一批里延迟最低的线路（不是第一个回包的）。
+
+        Taking the first answer was the wrong ranking: a 900 ms node that answers before a 120 ms one made
+        every install and every page load slow. A sub-200 ms answer still returns at once; otherwise the
+        whole batch (36) is waited for and the fastest of it wins.
+        """
         if not self.core.alive():
             return ""
         nodes = self.nodes()
@@ -372,6 +391,7 @@ class Service:
                  [n for n in nodes if n.get("type") in ("http", "socks5")]
         names = [n["name"] for n in prefer[:limit] if n["name"] != exclude]
         import concurrent.futures as cf
+        best = None
         for i in range(0, len(names), 36):
             batch = names[i:i + 36]
             with cf.ThreadPoolExecutor(max_workers=36) as ex:
@@ -381,10 +401,16 @@ class Service:
                         d = f.result()
                     except Exception:
                         d = None
-                    if d:
-                        self._save_delays({futs[f]: d})
+                    if not d:
+                        continue
+                    self._save_delays({futs[f]: d})
+                    if d <= 200:
                         return futs[f]
-        return ""
+                    if best is None or d < best[1]:
+                        best = (futs[f], d)
+            if best is not None and i >= 36:
+                break                       # two full batches is enough for a first connection
+        return best[0] if best else ""
 
     def _wait_mixed(self, timeout=12.0) -> bool:
         """等待内核的混合代理端口真正进入监听状态。"""
@@ -629,7 +655,7 @@ class Service:
                 reach = P.tcp_prefilter(cand, logger=step)
                 self.task["progress"] = 55
                 alive = P.verify(self.core_exe, self.home, reach, timeout_ms=6000,
-                                 keep=1800, logger=step, batch=400)
+                                 keep=2400, logger=step, batch=400)
                 self.task["progress"] = 85
                 merged = P.merge_pool(alive, reach, total=2500, max_plain_ratio=0.42)
                 clean = [{k: v for k, v in p.items() if not k.startswith("_")} for p in merged]

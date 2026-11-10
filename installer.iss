@@ -2,7 +2,7 @@
 #define MyAppName "QuChen VPN"
 ; CI passes /DMyAppVersion=<version> from app/backend/service.py APP_VER; the fallback is for a local build
 #ifndef MyAppVersion
-#define MyAppVersion "1.0.8"
+#define MyAppVersion "1.0.9"
 #endif
 #define MyAppExe "QuChenVPN.exe"
 

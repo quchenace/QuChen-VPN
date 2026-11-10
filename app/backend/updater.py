@@ -247,7 +247,9 @@ rem ---- write new build ----
 rem Full package: mirror mode, purge obsolete program files FIRST then copy (delete-then-update).
 rem Suspicious dirs that must never be purged by the mirror pass: user data / logs.
 rem The kernel under runtime/  IS part of the package and is meant to be refreshed.
-robocopy "%SRC%" "%DST%" {mode} /XD "{dxdata}" "{dxlogs}" /XF "settings.json" /R:2 /W:1 /NFL /NDL /NJH /NJS /NC /NS >nul
+rem unins* is the installer's uninstall entry: a zip never contains it, so a mirror copy would delete
+rem it and leave "Apps & features" pointing at a file that no longer exists.
+robocopy "%SRC%" "%DST%" {mode} /XD "{dxdata}" "{dxlogs}" /XF "settings.json" "unins*" /R:2 /W:1 /NFL /NDL /NJH /NJS /NC /NS >nul
 if errorlevel 8 goto rollback
 
 rem ---- launch new build ----
