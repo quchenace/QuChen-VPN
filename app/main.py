@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import ctypes
-import json
 import os
+import re
 import sys
 import threading
 import time
@@ -124,6 +124,8 @@ class Api:
         if self.svc.task.get("running"):
             return {"ok": True, "pending": True, "msg": "任务进行中，请稍候"}
         svc = self.svc
+        # Claim the task before the thread starts, so a second click cannot start a second connect.
+        svc.task = {"running": True, "kind": "connect", "msg": "正在连接…", "progress": 5}
 
         def _run():
             try:
@@ -141,14 +143,22 @@ class Api:
         return self.svc.toggle()
 
     def restart_core(self):
+        """Restart in the background: disconnect + connect can take 20 s, and the old code blocked the UI thread."""
         was = self.svc.core.alive()
-        if was:
-            self.svc.disconnect()
-            time.sleep(0.4)
-        if was or self.svc.settings.get("auto_connect"):
-            r = self.svc.connect()
-            return {"ok": r.get("ok", False), "msg": r.get("msg", "内核已重置")}
-        return {"ok": True, "msg": "内核已重置"}
+        svc = self.svc
+
+        def _run():
+            try:
+                if was:
+                    svc.disconnect()
+                    time.sleep(0.4)
+                if was or svc.settings.get("auto_connect"):
+                    svc.connect()
+            except Exception as e:
+                svc._log(f"[core] 重启内核异常 {type(e).__name__}: {e}")
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"ok": True, "pending": True, "msg": "正在重启内核…"}
 
     def select_node(self, name):
         return self.svc.select_node(name)
@@ -184,7 +194,9 @@ class Api:
     def install_update(self):
         r = self.svc.install_update()
         if r.get("ok"):
-            threading.Timer(1.2, lambda: self.window.destroy()).start()
+            timer = threading.Timer(1.2, lambda: self.window.destroy())
+            timer.daemon = True
+            timer.start()
         return r
 
     def set_update_token(self, token):
@@ -201,7 +213,8 @@ class Api:
         else:
             cmd = f'"{exe}" "{os.path.join(self.svc.base, "app", "main.py")}" --min'
         ok = sysproxy.set_autostart(bool(on), cmd)
-        self.svc.settings["auto_start"] = bool(on)
+        # Only report what the registry actually took: a denied write must not leave the switch "on".
+        self.svc.settings["auto_start"] = bool(on) if ok else False
         self.svc.save_settings()
         return {"ok": ok}
 
@@ -216,16 +229,21 @@ class Api:
         return {"ok": True}
 
     def open_url(self, url):
+        """Only http(s). os.startfile on an arbitrary string is a local-execution path, and the page only
+        ever sends links."""
+        u = str(url or "").strip()
+        if not re.match(r"^https?://", u, re.I):
+            return {"ok": False, "msg": "只打开 http/https 链接"}
         try:
-            os.startfile(url)
+            import webbrowser
+            return {"ok": bool(webbrowser.open(u))}
         except Exception:
-            pass
-        return {"ok": True}
+            return {"ok": False}
 
     def copy(self, text):
         try:
             import subprocess
-            subprocess.run("clip", input=str(text).encode("utf-16le"), shell=True,
+            subprocess.run(["clip"], input=str(text).encode("utf-16le"),
                            creationflags=0x08000000, timeout=5)
             return {"ok": True}
         except Exception:

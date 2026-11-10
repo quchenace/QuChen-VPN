@@ -484,7 +484,12 @@ def valid(p: dict) -> bool:
 
 
 def fingerprint(p: dict) -> str:
-    key = "|".join(str(p.get(k, "")) for k in
-                    ("type", "server", "port", "uuid", "password", "cipher",
-                     "network", "servername", "sni"))
-    return hashlib.md5(key.encode()).hexdigest()
+    """A stable identity for dedupe. The wire options matter: the same server/uuid with two WebSocket
+    paths, gRPC services or REALITY short ids are different nodes, and collapsing them dropped working
+    lines (the first one seen won, whatever its path)."""
+    key = json.dumps({
+        k: p.get(k) for k in
+        ("type", "server", "port", "uuid", "password", "cipher", "network", "servername", "sni",
+         "flow", "tls", "ws-opts", "grpc-opts", "h2-opts", "reality-opts", "alpn", "obfs", "obfs-password")
+    }, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.md5(key.encode("utf-8")).hexdigest()

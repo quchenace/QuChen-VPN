@@ -25,11 +25,17 @@ ASSET_KEYWORD = "QuChenVPN-win64"
 # 国内直连 GitHub API 常被重置，检查更新时依次尝试的镜像前缀
 API_MIRRORS = (
     "",
+    "https://ghproxy.net/",
+    "https://gh.nxnow.top/",
     "https://ghfast.top/",
     "https://gh-proxy.com/",
 )
 
 DOWNLOAD_MIRRORS = (
+    # Measured 2026-11-11: these two answer from CN; ghfast/gh-proxy time out. Direct GitHub is last
+    # because a stalled GitHub connection would otherwise spend a minute before the first mirror.
+    "https://ghproxy.net/",
+    "https://gh.nxnow.top/",
     "",
     "https://ghfast.top/",
     "https://gh-proxy.com/",
@@ -269,6 +275,25 @@ exit /b 1
 """
 
 
+MAX_UNPACKED = 3 * 1024 * 1024 * 1024
+MAX_MEMBERS = 50000
+
+
+def _check_archive(z: zipfile.ZipFile):
+    """A corrupt or hostile archive must not fill the disk or escape the work folder."""
+    total = 0
+    members = z.infolist()
+    if len(members) > MAX_MEMBERS:
+        raise IOError(f"更新包文件过多（{len(members)}）")
+    for m in members:
+        total += m.file_size
+        if total > MAX_UNPACKED:
+            raise IOError("更新包解压后超过 3 GB，已中止")
+        name = m.filename.replace("\\", "/")
+        if name.startswith("/") or ".." in name.split("/"):
+            raise IOError(f"更新包含非法路径：{m.filename}")
+
+
 def apply_update(package: str, exe_name: str = "QuChenVPN.exe", on_stage=None) -> str:
     """解压更新包，生成替换脚本并启动，返回脚本路径。"""
     work = os.path.join(tempfile.gettempdir(), "QuChenVPN_update")
@@ -278,6 +303,7 @@ def apply_update(package: str, exe_name: str = "QuChenVPN.exe", on_stage=None) -
 
     if package.lower().endswith(".zip"):
         with zipfile.ZipFile(package) as z:
+            _check_archive(z)
             z.extractall(work)
         entries = [e for e in os.listdir(work) if not e.startswith("__")]
         if len(entries) == 1 and os.path.isdir(os.path.join(work, entries[0])):

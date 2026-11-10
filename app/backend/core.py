@@ -4,19 +4,15 @@ from __future__ import annotations
 import json
 import os
 import random
-import re
 import socket
 import string
 import subprocess
-import sys
 import threading
 import time
 from collections import deque
 
 import requests
 import yaml
-
-from . import nodes as N
 
 APP_NAME = "QuChen"
 MIXED_PORT = 7890
@@ -51,7 +47,6 @@ class SafeDumper(yaml.SafeDumper):
 
 
 def _str_repr(dumper, data):
-    style = '"' if any(c in data for c in (":", "#", "\n")) or data == "" else "'"
     if "\n" in data:
         return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
     return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="'")
@@ -275,9 +270,9 @@ class Core:
         finally:
             sess.close()
 
-    def version(self):
+    def version(self, timeout=4):
         try:
-            return self.request("GET", "/version").json()
+            return self.request("GET", "/version", timeout=timeout).json()
         except Exception:
             return {}
 
@@ -379,7 +374,7 @@ class Core:
                 time.sleep(0.25)
                 if self.proc.poll() is not None:
                     break
-                if self.version():
+                if self.version(timeout=0.8):
                     ok = True
                     break
             if ok:

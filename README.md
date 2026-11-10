@@ -1,6 +1,6 @@
 # QuChen VPN
 
-> 版本：v1.0.9 · [下载](https://github.com/quchenace/QuChen-VPN/releases/latest)
+> 版本：v1.0.10 · [下载](https://github.com/quchenace/QuChen-VPN/releases/latest)
 
 Windows 桌面代理客户端：聚合互联网公开的免费节点订阅源，自动测速去重，一键连接。
 界面参考 FlClash 类客户端的视觉语言，使用 **Python + WebView2 + mihomo 内核** 实现。
@@ -72,6 +72,16 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 可用性由第三方维护者决定，请遵守所在地区法律法规，自行承担使用风险。
 
 ## 更新日志
+
+### v1.0.10
+- 修复：同服务器、同 UUID 但 WebSocket 路径 / gRPC 服务名 / REALITY short-id 不同的节点被当成重复项删掉，只剩第一个；去重指纹现在包含这些线路参数
+- 修复：测速临时内核连续 12 次启动失败时没有报错，继续用一个没起来的核测速，最后给出空池；现在明确抛出“测速内核未能启动”
+- 修复：连接时自动从慢节点换到快节点后没有保存设置，下次启动又回到旧慢节点；现在换线即写回
+- 修复：订阅源与更新检查仍把已经超时的 ghfast / gh-proxy 放在前面；加入实测可用的 ghproxy.net / gh.nxnow.top
+- 修复：更新包解压没有上限，损坏或恶意包可能写满磁盘或越出目录；限制 3 GB / 5 万文件并拒绝 .. 路径
+- 修复：设置页“重启内核”在 UI 线程同步执行，最长卡 20 秒；改为后台线程
+- 修复：open_url 接受任意字符串，可被页面当成启动本地程序的入口；只允许 http(s)。复制改用 clip.exe，不再经过 shell
+- 构建：版本 1.0.10
 
 ### v1.0.9
 - 修复：首次连接/没有已测速节点时，快选拿到的是"第一个回包"的节点，而不是最快的；现在同批 36 个里取最低延迟，<200 ms 立即采用

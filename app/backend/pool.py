@@ -88,6 +88,7 @@ def verify(core_exe, home, proxies, timeout_ms=5000, logger=print, keep=600, bat
         return []
     nodes = list(proxies)
     c = None
+    started = False
     for _ in range(12):
         batches = [nodes[i:i + batch] for i in range(0, len(nodes), batch)]
         extra = [
@@ -101,6 +102,7 @@ def verify(core_exe, home, proxies, timeout_ms=5000, logger=print, keep=600, bat
         c.build(nodes, mode="rule", extra_groups=extra, compact_groups=True)
         try:
             c.start()
+            started = True
             break
         except Exception:
             bad = None
@@ -116,6 +118,12 @@ def verify(core_exe, home, proxies, timeout_ms=5000, logger=print, keep=600, bat
                 continue
             raise
 
+    if not started:
+        try:
+            c.stop()
+        except Exception:
+            pass
+        raise RuntimeError("测速内核未能启动（配置里的节点全被内核拒绝，或端口/权限不可用）")
     try:
         logger(f"[verify] 共 {len(nodes)} 个节点，分 {len(batches)} 批测速")
         by_name = {p["name"]: p for p in nodes}

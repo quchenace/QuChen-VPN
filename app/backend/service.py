@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -19,7 +18,7 @@ from . import sysproxy
 from . import updater
 
 APP_TITLE = "QuChen VPN"
-APP_VER = "1.0.9"
+APP_VER = "1.0.10"
 UPDATE_REPO = "quchenace/QuChen-VPN"
 
 
@@ -271,6 +270,7 @@ class Service:
                             if int(rival.get("delay") or 9999) + 150 < int(chosen.get("delay") or 9999):
                                 if self.core.select(C.GROUP_SELECT, fastest):
                                     self.settings["node"] = fastest
+                                    self.save_settings()
                                     self._log(f"[core] {target} 延迟 {chosen.get('delay')}ms，换到更快的 {fastest} {rival.get('delay')}ms")
                 else:
                     # 优先选已知延迟最低的节点，否则现场快速探测
@@ -278,6 +278,7 @@ class Service:
                     if best:
                         self.core.select(C.GROUP_SELECT, best)
                         self.settings["node"] = best
+                        self.save_settings()
                     else:
                         self.task["msg"] = "正在探测可用线路…"
                         self.task["progress"] = 78
@@ -285,6 +286,7 @@ class Service:
                         if best:
                             self.core.select(C.GROUP_SELECT, best)
                             self.settings["node"] = best
+                            self.save_settings()
                             self._log(f"[core] 探测到可用线路 {best}")
                         else:
                             self.core.select(C.GROUP_SELECT, C.GROUP_AUTO)
@@ -394,7 +396,8 @@ class Service:
         best = None
         for i in range(0, len(names), 36):
             batch = names[i:i + 36]
-            with cf.ThreadPoolExecutor(max_workers=36) as ex:
+            ex = cf.ThreadPoolExecutor(max_workers=36)
+            try:
                 futs = {ex.submit(self.core.delay, n, timeout): n for n in batch}
                 for f in cf.as_completed(futs):
                     try:
@@ -405,9 +408,17 @@ class Service:
                         continue
                     self._save_delays({futs[f]: d})
                     if d <= 200:
+                        # Return now: a with-block would wait for the other 35 probes before handing the
+                        # "immediate" answer back (up to 3.5 s). The remaining probes finish in the
+                        # background and only fill their own delay fields.
+                        for pending in futs:
+                            pending.cancel()
+                        ex.shutdown(wait=False, cancel_futures=True)
                         return futs[f]
                     if best is None or d < best[1]:
                         best = (futs[f], d)
+            finally:
+                ex.shutdown(wait=False, cancel_futures=True)
             if best is not None and i >= 36:
                 break                       # two full batches is enough for a first connection
         return best[0] if best else ""

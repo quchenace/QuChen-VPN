@@ -53,6 +53,9 @@ def _mirror_urls(url: str):
         repo, branch, file = m.group(1), m.group(2), m.group(3)
         yield f"https://cdn.jsdelivr.net/gh/{repo}@{branch}/{file}"
         yield f"https://fastly.jsdelivr.net/gh/{repo}@{branch}/{file}"
+        # Measured 2026-11-11: these answer where ghfast/gh-proxy time out.
+        yield f"https://ghproxy.net/{url}"
+        yield f"https://gh.nxnow.top/{url}"
         yield f"https://ghfast.top/{url}"
         yield f"https://gh-proxy.com/{url}"
 
