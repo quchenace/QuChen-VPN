@@ -188,13 +188,15 @@ def set_proxy(enabled: bool, server: str = "", bypass_extra: str = "") -> bool:
                                       backup.get("AutoConfigURL"))
                 _clear_backup()
             else:
+                # 没有备份，就不知道自己有没有写过：只有在当前 ProxyServer 确实是我们写的那个时才清，
+                # 否则会把用户自己（或别的软件）设的代理一并关掉，整台电脑没网。
                 cur = ""
                 try:
                     cur = winreg.QueryValueEx(k, "ProxyServer")[0]
                 except FileNotFoundError:
                     pass
-                winreg.SetValueEx(k, "ProxyEnable", 0, winreg.REG_DWORD, 0)
-                if (not server) or _norm_server(cur) == _norm_server(server):
+                if server and _norm_server(cur) == _norm_server(server):
+                    winreg.SetValueEx(k, "ProxyEnable", 0, winreg.REG_DWORD, 0)
                     winreg.SetValueEx(k, "ProxyServer", 0, winreg.REG_SZ, "")
         _notify()
         return True
@@ -217,16 +219,18 @@ def is_admin() -> bool:
         return False
 
 
-def run_as_admin():
-    """以管理员身份重新启动自身。"""
+def run_as_admin(extra: str = ""):
+    """以管理员身份重新启动自身。extra 追加到命令行（提权实例用 --elevated 跳过单实例检查）。"""
     try:
         if getattr(sys, "frozen", False):
             exe, args = sys.executable, " ".join(sys.argv[1:])
         else:
             exe = sys.executable
             args = " ".join(f'"{a}"' for a in sys.argv)
-        ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, args, os.getcwd(), 1)
-        return True
+        if extra and extra not in args:
+            args = (args + " " + extra).strip()
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, args, os.getcwd(), 1)
+        return int(rc) > 32                      # ShellExecuteW 返回值 <=32 是错误码
     except Exception:
         return False
 

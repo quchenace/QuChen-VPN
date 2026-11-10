@@ -1,6 +1,9 @@
 ; QuChen VPN —— Inno Setup 脚本（由 CI 调用）
 #define MyAppName "QuChen VPN"
-#define MyAppVersion "1.0.7"
+; CI passes /DMyAppVersion=<version> from app/backend/service.py APP_VER; the fallback is for a local build
+#ifndef MyAppVersion
+#define MyAppVersion "1.0.8"
+#endif
 #define MyAppExe "QuChenVPN.exe"
 
 [Setup]

@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -141,6 +142,7 @@ def check(repo: str = None, current: str = "", token: str = None, proxies=None,
         "asset_name": (asset or {}).get("name", ""),
         "asset_url": (asset or {}).get("browser_download_url", ""),
         "asset_size": (asset or {}).get("size", 0),
+        "asset_digest": (asset or {}).get("digest") or "",        # "sha256:..." when GitHub records it
         "published": (data.get("published_at") or "")[:19].replace("T", " "),
         "page": data.get("html_url", ""),
         "msg": (f"发现新版本 {tag}" if newer else f"已是最新版本（{current}）"),
@@ -148,8 +150,8 @@ def check(repo: str = None, current: str = "", token: str = None, proxies=None,
 
 
 def download(url: str, dest: str, progress=None, proxies=None,
-             expect_size: int = 0, token: str = None) -> str:
-    """下载更新包；自动尝试镜像，下载后校验大小与 zip 完整性。"""
+             expect_size: int = 0, token: str = None, sha256: str = "") -> str:
+    """下载更新包；自动尝试镜像，下载后校验大小、SHA-256（GitHub 给出时）与 zip 完整性。"""
     os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
     headers = {"User-Agent": "QuChenVPN-updater"}
     if token:
@@ -182,6 +184,16 @@ def download(url: str, dest: str, progress=None, proxies=None,
             size = os.path.getsize(tmp)
             if expect_size and size != int(expect_size):
                 raise IOError(f"大小不符 {size}/{expect_size}")
+            want = (sha256 or "").strip().lower()
+            if want.startswith("sha256:"):
+                want = want[7:]
+            if want:
+                h = hashlib.sha256()
+                with open(tmp, "rb") as fh:
+                    for block in iter(lambda: fh.read(1024 * 1024), b""):
+                        h.update(block)
+                if h.hexdigest() != want:
+                    raise IOError("更新包校验失败（SHA-256 不符）")
             if dest.lower().endswith(".zip"):
                 with zipfile.ZipFile(tmp) as z:
                     bad = z.testzip()

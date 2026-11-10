@@ -41,6 +41,10 @@ SOURCES = [
 
 _RAW = re.compile(r"^https://raw\.githubusercontent\.com/([^/]+/[^/]+)/([^/]+)/(.+)$")
 
+#: 单个订阅源最多读 8 MB、最多解析 6 MB：公开源不可信，一枚超大响应或 YAML 别名炸弹就能把客户端吃满内存
+MAX_FETCH = 8 * 1024 * 1024
+MAX_PARSE = 6 * 1024 * 1024
+
 
 def _mirror_urls(url: str):
     yield url
@@ -72,7 +76,7 @@ ClashLoader.add_multi_constructor("!", _unknown)
 def load_yaml(text: str):
     try:
         return yaml.load(text, Loader=ClashLoader)
-    except Exception:
+    except (Exception, MemoryError):
         return None
 
 
@@ -85,8 +89,10 @@ def parse_payload(text: str):
         return out, "empty"
 
     data = None
+    text = text[:MAX_PARSE]
     head = text[:300000]
-    if "proxies:" in head or "proxy-groups:" in head:
+    # YAML 的 &锚点 / *引用 可以指数级展开（billion laughs）。正常订阅远低于这个数，超了就不按 YAML 解析。
+    if ("proxies:" in head or "proxy-groups:" in head) and text.count("&") + text.count("*") <= 4000:
         data = load_yaml(text)
     if isinstance(data, dict) and isinstance(data.get("proxies"), list):
         for p in data["proxies"]:
@@ -132,10 +138,25 @@ def fetch(url: str, timeout: int = 25, proxies=None) -> str:
     last = ""
     for u in _mirror_urls(url):
         try:
-            r = requests.get(u, timeout=timeout, headers={"User-Agent": UA}, proxies=proxies)
-            if r.status_code == 200 and len(r.content) > 64:
-                return r.text
-            last = f"HTTP {r.status_code}"
+            with requests.get(u, timeout=timeout, headers={"User-Agent": UA}, proxies=proxies,
+                              stream=True) as r:
+                if r.status_code != 200:
+                    last = f"HTTP {r.status_code}"
+                    continue
+                announced = int(r.headers.get("Content-Length") or 0)
+                if announced > MAX_FETCH:
+                    last = f"too large ({announced} bytes)"
+                    continue
+                buf = bytearray()
+                for chunk in r.iter_content(64 * 1024):
+                    if not chunk:
+                        continue
+                    buf += chunk
+                    if len(buf) > MAX_FETCH:
+                        raise RuntimeError("too large")
+                if len(buf) > 64:
+                    return bytes(buf).decode("utf-8", "ignore")
+                last = "empty"
         except Exception as e:
             last = type(e).__name__
     raise RuntimeError(last or "fail")

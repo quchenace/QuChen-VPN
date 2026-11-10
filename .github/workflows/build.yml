@@ -22,6 +22,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Version
+        id: ver
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          $ver = (Select-String -Path app/backend/service.py -Pattern 'APP_VER\s*=\s*"([0-9.]+)"').Matches[0].Groups[1].Value
+          if (-not $ver) { throw "no APP_VER in app/backend/service.py" }
+          $tag = "$env:INPUT_VERSION"
+          if (-not $tag) {
+            if ("${{ github.ref_type }}" -ne "tag") { throw "workflow_dispatch needs a version (e.g. v1.0.8) when it is not run from a tag" }
+            $tag = "${{ github.ref_name }}"
+          }
+          if ($tag -notmatch '^v') { $tag = "v$tag" }
+          if ($tag.TrimStart('v') -ne $ver) { throw "tag $tag does not match APP_VER $ver" }
+          "version=$ver" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          Write-Host "version $ver, tag $tag"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -69,15 +88,15 @@ jobs:
           choco install innosetup -y --no-progress | Out-Null
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { $iscc = (Get-ChildItem "C:\Program Files*\Inno Setup*\ISCC.exe" | Select-Object -First 1).FullName }
-          & $iscc "installer.iss"
+          & $iscc "/DMyAppVersion=${{ steps.ver.outputs.version }}" "installer.iss"
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
           Get-ChildItem release | Select-Object Name, Length
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.version || github.ref_name }}
-          name: "QuChen VPN ${{ github.event.inputs.version || github.ref_name }}"
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: "QuChen VPN ${{ steps.ver.outputs.tag }}"
           files: |
             release/QuChenVPN-win64.zip
             release/QuChenVPN-Setup.exe

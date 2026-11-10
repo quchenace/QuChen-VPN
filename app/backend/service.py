@@ -19,7 +19,7 @@ from . import sysproxy
 from . import updater
 
 APP_TITLE = "QuChen VPN"
-APP_VER = "1.0.7"
+APP_VER = "1.0.8"
 UPDATE_REPO = "quchenace/QuChen-VPN"
 
 
@@ -69,6 +69,10 @@ class Service:
         self.stats = self._load_stats()
         self._ensure_geo()
         self._last_stat = time.time()
+        # 本次内核会话上一次读到的累计字节：tick_stats 只把增量记进当天/总计，内核重启（计数归零）时自动重置
+        self._last_core_up = 0
+        self._last_core_down = 0
+        self._last_save = 0.0
 
     # ------------------------------------------------------------ 基础
     def _log(self, msg: str):
@@ -165,8 +169,6 @@ class Service:
             except Exception:
                 cur = ""
         node = self.node_by_name(self.settings.get("node") or "") or {}
-        today = time.strftime("%Y-%m-%d")
-        d = self.stats.get("days", {}).get(today, {})
         return {
             "version": APP_VER,
             "connected": alive,
@@ -178,8 +180,8 @@ class Service:
             "uptime": uptime,
             "up": c.up if alive else 0,
             "down": c.down if alive else 0,
-            "total_up": (c.upload_total if alive else 0) + d.get("up", 0),
-            "total_down": (c.download_total if alive else 0) + d.get("down", 0),
+            "total_up": c.upload_total if alive else 0,
+            "total_down": c.download_total if alive else 0,
             "mode": self.settings.get("mode", "rule"),
             "sys_proxy": bool(alive and c.mixed_port and
                               sysproxy.proxy_effective(f"127.0.0.1:{c.mixed_port}")),
@@ -757,6 +759,8 @@ class Service:
                 updater.download(url, dest,
                                  progress=lambda p: self.update.update({"progress": p}),
                                  proxies=None,
+                                 token=(self.settings.get("update_token") or "").strip() or None,
+                                 sha256=self.update.get("asset_digest") or "",
                                  expect_size=int(self.update.get("asset_size") or 0))
                 self._log(f"[update] 下载完成 {dest}")
                 self.update["downloading"] = False
@@ -810,17 +814,34 @@ class Service:
 
     # ------------------------------------------------------------ 统计
     def tick_stats(self):
+        """把本次内核会话新增的流量累加到当天与总计。
+
+        内核的 upload_total/download_total 每次 start() 都从 0 开始，所以这里只记增量：
+        旧写法 max(当天, 会话累计) 在第二次连接后会少记，而 state() 又把会话累计和当天相加，
+        导致“本次流量”翻倍。增量法同时解决这两个问题。"""
         if not self.core.alive():
+            self._last_core_up = self._last_core_down = 0
             return
         now = time.time()
         if now - self._last_stat < 5:
             return
         self._last_stat = now
+        up, down = int(self.core.upload_total or 0), int(self.core.download_total or 0)
+        if up < self._last_core_up or down < self._last_core_down:      # 内核重启：计数归零
+            self._last_core_up = self._last_core_down = 0
+        du, dd = max(0, up - self._last_core_up), max(0, down - self._last_core_down)
+        self._last_core_up, self._last_core_down = up, down
+        if not du and not dd:
+            return
         day = time.strftime("%Y-%m-%d")
         d = self.stats.setdefault("days", {}).setdefault(day, {"up": 0, "down": 0})
-        # core 内的累计值只在本次会话内有效
-        d["up"] = max(d.get("up", 0), self.core.upload_total)
-        d["down"] = max(d.get("down", 0), self.core.download_total)
+        d["up"] = int(d.get("up", 0)) + du
+        d["down"] = int(d.get("down", 0)) + dd
+        self.stats["total_up"] = int(self.stats.get("total_up", 0)) + du
+        self.stats["total_down"] = int(self.stats.get("total_down", 0)) + dd
+        if now - self._last_save > 60:                                   # 崩溃最多丢一分钟
+            self._last_save = now
+            self.save_stats()
 
     def flush_stats(self):
         self.tick_stats()

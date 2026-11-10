@@ -16,6 +16,62 @@ from backend.service import Service, APP_TITLE, APP_VER  # noqa: E402
 from backend import sysproxy  # noqa: E402
 
 user32 = ctypes.windll.user32
+_kernel32 = ctypes.windll.kernel32
+
+# 64 位 Windows 的 HWND / HANDLE 是 64 位；不声明 argtypes/restype 时 ctypes 默认按 C int 传，句柄会被截断。
+user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+user32.ShowWindow.restype = ctypes.c_bool
+user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+user32.SetForegroundWindow.restype = ctypes.c_bool
+user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+user32.FindWindowW.restype = ctypes.c_void_p
+user32.IsZoomed.argtypes = [ctypes.c_void_p]
+user32.IsZoomed.restype = ctypes.c_bool
+user32.ReleaseCapture.restype = ctypes.c_bool
+user32.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
+user32.PostMessageW.restype = ctypes.c_bool
+_kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+_kernel32.CreateMutexW.restype = ctypes.c_void_p
+_kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+_kernel32.CloseHandle.restype = ctypes.c_bool
+
+#: 单实例互斥体：开机自启 + 手动双击、或提权重启，都可能同时跑两个客户端；
+#: 两个内核会抢端口、两份系统代理互相覆盖，关机时还原顺序也会错。
+_INSTANCE_NAME = "Local\\QuChenVPN.SingleInstance"
+_instance_handle = None
+
+
+def _release_instance():
+    global _instance_handle
+    if _instance_handle:
+        try:
+            _kernel32.CloseHandle(_instance_handle)
+        except Exception:
+            pass
+        _instance_handle = None
+
+
+def _acquire_instance() -> bool:
+    """True: 本进程是唯一实例（或 --elevated 的新实例）。False: 已有一个在跑，已把它叫到前台。"""
+    global _instance_handle
+    if "--elevated" in sys.argv:
+        return True
+    kernel32 = _kernel32
+    try:
+        handle = kernel32.CreateMutexW(None, False, _INSTANCE_NAME)
+        if not handle:
+            return True
+        if kernel32.GetLastError() == 183:          # ERROR_ALREADY_EXISTS
+            hwnd = user32.FindWindowW(None, "QuChen VPN")
+            if hwnd:
+                user32.ShowWindow(hwnd, 9)          # SW_RESTORE
+                user32.SetForegroundWindow(hwnd)
+            kernel32.CloseHandle(handle)
+            return False
+        _instance_handle = handle
+        return True
+    except Exception:
+        return True
 
 SW_MINIMIZE, SW_MAXIMIZE, SW_RESTORE = 6, 3, 9
 WM_SYSCOMMAND, SC_SIZE = 0x0112, 0xF000
@@ -42,7 +98,9 @@ class Api:
     # -------------------------------------------------- 基础数据
     def bootstrap(self):
         try:
-            threading.Timer(1.5, self.svc.maybe_autotest).start()
+            timer = threading.Timer(1.5, self.svc.maybe_autotest)
+            timer.daemon = True
+            timer.start()
         except Exception:
             pass
         return {
@@ -174,7 +232,12 @@ class Api:
             return {"ok": False}
 
     def elevate(self):
-        return {"ok": sysproxy.run_as_admin()}
+        ok = sysproxy.run_as_admin("--elevated")
+        if ok:
+            # 提权实例已经带着 --elevated 起来；本实例退出，避免两个内核、两份系统代理
+            _release_instance()
+            threading.Timer(1.0, self.window.destroy).start()
+        return {"ok": ok}
 
     # -------------------------------------------------- 窗口
     def win_min(self):
@@ -227,6 +290,9 @@ def _icon_path(base: str) -> str:
 
 
 def main():
+    if not _acquire_instance():
+        return
+    start_min = "--min" in sys.argv
     svc = Service()
     svc._log(f"[app] {APP_TITLE} v{APP_VER} 启动")
     api = Api(svc)
@@ -271,8 +337,19 @@ def main():
     threading.Thread(target=autoconnect, daemon=True).start()
 
     icon = _icon_path(base)
+
+    def _started():
+        # 开机自启写的是 --min：GUI 起来后最小化，别占着桌面
+        if start_min:
+            time.sleep(0.8)
+            try:
+                window.minimize()
+            except Exception:
+                pass
+
     try:
         webview.start(
+            _started,
             debug=False,
             gui="edgechromium",
             private_mode=False,
@@ -281,6 +358,7 @@ def main():
         )
     finally:
         svc.shutdown()
+        _release_instance()
 
 
 if __name__ == "__main__":

@@ -267,7 +267,13 @@ class Core:
         url = self.api + path
         kw.setdefault("timeout", 4)
         kw.setdefault("headers", self._h())
-        return requests.request(method, url, **kw)
+        # 本机控制口不能走系统/环境里的代理：环境变量里一个失效的 HTTP_PROXY 会让控制面全部超时
+        sess = requests.Session()
+        sess.trust_env = False
+        try:
+            return sess.request(method, url, **kw)
+        finally:
+            sess.close()
 
     def version(self):
         try:
@@ -317,14 +323,15 @@ class Core:
             return {}
 
     # -------------------------------------------------- 流量线程
-    def _traffic_loop(self):
+    def _traffic_loop(self, stop: threading.Event):
         sess = requests.Session()
+        sess.trust_env = False
         sess.headers.update(self._h())
-        while not self._stop_flag.is_set():
+        while not stop.is_set():
             try:
                 with sess.get(f"{self.api}/traffic", stream=True, timeout=10) as r:
                     for line in r.iter_lines():
-                        if self._stop_flag.is_set():
+                        if stop.is_set():
                             break
                         if not line:
                             continue
@@ -362,7 +369,7 @@ class Core:
                 cwd=self.home, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 env=env, creationflags=creation,
             )
-            self._stop_flag.clear()
+            self._stop_flag = threading.Event()
             self._log_thread = threading.Thread(target=self._pipe_logs, daemon=True)
             self._log_thread.start()
             threading.Thread(target=self._pipe_stderr, daemon=True).start()
@@ -390,7 +397,7 @@ class Core:
         self.started_at = time.time()
         self.upload_total = 0
         self.download_total = 0
-        self._traffic_thread = threading.Thread(target=self._traffic_loop, daemon=True)
+        self._traffic_thread = threading.Thread(target=self._traffic_loop, args=(self._stop_flag,), daemon=True)
         self._traffic_thread.start()
         self.log(f"[core] 内核就绪 {self.version().get('version', '')}")
         return True
@@ -417,10 +424,11 @@ class Core:
                 except Exception:
                     pass
         self.proc = None
-        for t in (self._log_thread,):
+        for t in (self._log_thread, self._traffic_thread):
             if t and t.is_alive():
-                t.join(timeout=1)
+                t.join(timeout=2)
         self._log_thread = None
+        self._traffic_thread = None
 
     def alive(self) -> bool:
         return bool(self.proc and self.proc.poll() is None)
