@@ -304,8 +304,25 @@ class Core:
         return r.status_code in (200, 204)
 
     def current(self, group=GROUP_SELECT):
-        p = self.proxies().get(group) or {}
-        return p.get("now", "")
+        # 界面每秒轮询一次 state()。旧实现每次都 GET /proxies 把 2500 条节点全量拉回来解析，
+        # 单页几百 KB~几 MB，正好卡在主线程轮询上，表现就是窗口点不动。这里改成
+        # 只查当前组（轻量）+ 1.5 秒内复用缓存。
+        now_ts = time.time()
+        cache = getattr(self, "_cur_cache", None)
+        if cache and cache[0] == group and now_ts - cache[1] < 1.5:
+            return cache[2]
+        name = ""
+        try:
+            r = self.request("GET", f"/proxies/{requests.utils.quote(group, safe='')}", timeout=2)
+            if r.status_code == 200:
+                name = (r.json() or {}).get("now", "") or ""
+        except Exception:
+            name = ""
+        if not name:
+            p = self.proxies().get(group) or {}
+            name = p.get("now", "")
+        self._cur_cache = (group, now_ts, name)
+        return name
 
     def set_mode(self, mode):
         r = self.request("PATCH", "/configs", json={"mode": mode})

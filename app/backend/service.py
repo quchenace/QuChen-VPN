@@ -18,7 +18,7 @@ from . import sysproxy
 from . import updater
 
 APP_TITLE = "QuChen VPN"
-APP_VER = "1.0.10"
+APP_VER = "1.0.11"
 UPDATE_REPO = "quchenace/QuChen-VPN"
 
 
@@ -59,10 +59,16 @@ class Service:
         self.core_exe = os.path.join(self.core_dir, "mihomo.exe")
         self.logs: list[str] = []
         self._lock = threading.RLock()
+        # 连接流程要跑几十秒（构建配置 / 等端口 / 出口校验 / 换线），不能占用 _lock，
+        # 否则写日志、存设置、断开全被一起卡住，界面表现就是“点了没反应”。
+        self._conn_lock = threading.Lock()
         self.settings = self._load_settings()
         self.core = C.Core(self.core_exe, self.home, log_cb=self._log)
         self.pool = self._load_pool()
         self.task = {"running": False, "kind": "", "msg": "", "progress": 0}
+        # 测速进度单独记账：测速期间用户点连接会把 task 覆盖成 connect，
+        # 前端就再也等不到“speed 结束”的那次变化，于是“测好了列表也不刷新”。
+        self.speed = {"running": False, "msg": "", "ok_count": 0, "seq": 0}
         self.update = {"ok": True, "checking": False, "downloading": False, "has_update": False,
                        "latest": "", "current": APP_VER, "msg": "尚未检查", "progress": 0}
         self.stats = self._load_stats()
@@ -191,6 +197,7 @@ class Service:
             "ctrl_port": c.ctrl_port if alive else 0,
             "admin": sysproxy.is_admin(),
             "task": dict(self.task),
+            "speed": dict(self.speed),
             "logs": self.logs[-200:],
             "theme": self.settings.get("theme", "light"),
             "auto_start": sysproxy.get_autostart(),
@@ -209,7 +216,9 @@ class Service:
 
     # ------------------------------------------------------------ 连接
     def connect(self, node_name: str | None = None) -> dict:
-        with self._lock:
+        if not self._conn_lock.acquire(blocking=False):
+            return {"ok": False, "pending": True, "msg": "连接流程正在进行，请稍候"}
+        try:
             if self.core.alive():
                 # 内核还在跑不代表代理真的生效：上次异常退出、用户手动关了系统代理、
                 # 或系统启用了 PAC 都会造成"显示已连接但没走代理"。这里必须重新核对。
@@ -223,6 +232,12 @@ class Service:
                     return {"ok": False, "msg": "内核在运行，但系统代理接管失败",
                             "node": self.core.current()}
                 ok_exit, detail = self._verify_exit()
+                if not ok_exit:
+                    self._log(f"[core] 出口校验失败（{detail}），开始换线")
+                    ok_exit, detail, switched = self._switch_and_verify(
+                        exclude=[self.core.current()], attempts=4)
+                    if ok_exit:
+                        self._log(f"[core] 已换到 {switched}，出口连通")
                 msg = "已连接" if ok_exit else f"已连接，但出口未连通（{detail}）"
                 return {"ok": ok_exit, "msg": msg, "node": self.core.current()}
             if not self.nodes():
@@ -283,6 +298,17 @@ class Service:
                         self.task["msg"] = "正在探测可用线路…"
                         self.task["progress"] = 78
                         best = self._quick_pick()
+                        if not best:
+                            # 池子里一条已测速节点都没有时，旧代码直接把线路交给 url-test 组，
+                            # 该组 lazy 模式并不会立刻选出可用节点，紧接着的出口校验必然超时。
+                            # 这里先用主内核跑一小轮快测，拿到真实延迟再选。
+                            sample = [n["name"] for n in self.nodes()
+                                      if not isinstance(n.get("delay"), int)][:150]
+                            if sample:
+                                self._log(f"[core] 尚未测速，先快速探测 {len(sample)} 条线路")
+                                got = self._delay_many(sample, workers=24, timeout=2500, core=self.core)
+                                self._save_delays(got)
+                                best = self._fastest()
                         if best:
                             self.core.select(C.GROUP_SELECT, best)
                             self.settings["node"] = best
@@ -301,35 +327,34 @@ class Service:
                 self.task["progress"] = 90
                 ok_exit, detail = self._verify_exit()
                 if not ok_exit:
-                    self._log(f"[core] 出口校验失败（{detail}），尝试换线")
-                    alt = self._quick_pick(exclude=self.settings.get("node"))
-                    if alt:
-                        if self.core.select(C.GROUP_SELECT, alt):
-                            self.settings["node"] = alt
-                            self.save_settings()
-                            ok_exit, detail = self._verify_exit()
-                            self._log(f"[core] 切换到 {alt} 后{'校验通过' if ok_exit else '仍不通'}")
-
-                if not ok_exit:
-                    # 出口不通就不要继续占着系统代理，否则用户会觉得“连上了但整台电脑没网”
+                    self._log(f"[core] 出口校验失败（{detail}），开始换线")
+                    self.task["msg"] = "出口不通，正在自动换线…"
+                    ok_exit, detail, switched = self._switch_and_verify(
+                        exclude=[self.settings.get("node") or ""], attempts=4)
+                    if ok_exit:
+                        self._log(f"[core] 已换到 {switched}，出口连通")
                     try:
-                        sysproxy.set_proxy(False, f"127.0.0.1:{self.core.mixed_port}")
-                        self._log("[sys] 出口不可用，已还原系统代理")
+                        P.save(self.pool_path, self.nodes(), meta=self.pool.get("meta", {}))
                     except Exception:
                         pass
-                    proxy_ok = False
-                if ok_exit and proxy_ok:
+
+                if not ok_exit:
+                    # 探针全灭只说明“没验证到”，不等于链路一定不能用。内核已经起来、系统代理也接管了，
+                    # 这时候撤掉代理，用户看到的是“连上了但整台电脑没网”，比不通更糟。
+                    # 所以保留连接，把结论降级成“已连接（未验证）”，换线交给用户。
+                    self._log("[core] 出口探针未通过，保留连接与系统代理")
+                    msg = f"已连接，但出口校验未通过（{detail}），可换个线路再试"
+                    self.task = {"running": False, "kind": "connect", "msg": msg, "progress": 100}
+                    self._log(f"[core] {msg}")
+                    return {"ok": True, "msg": msg, "node": self.core.current(),
+                            "sys_proxy": proxy_ok, "verified": False}
+                if proxy_ok:
                     msg = "连接成功"
-                elif ok_exit and not proxy_ok:
-                    msg = "内核已就绪，但系统代理未接管"
-                elif not ok_exit:
-                    msg = f"已启动内核，但出口未连通（{detail}）"
                 else:
-                    msg = "连接成功"
-                self.task = {"running": False, "kind": "connect", "msg": msg,
-                             "progress": 100 if ok_exit else 85}
+                    msg = "内核已就绪，但系统代理未接管"
+                self.task = {"running": False, "kind": "connect", "msg": msg, "progress": 100}
                 self._log(f"[core] {msg}")
-                return {"ok": bool(ok_exit), "msg": msg, "node": self.core.current(),
+                return {"ok": True, "msg": msg, "node": self.core.current(),
                         "sys_proxy": proxy_ok, "verified": ok_exit}
             except Exception as e:
                 self.task = {"running": False, "kind": "connect", "msg": f"连接失败: {e}", "progress": 0}
@@ -340,6 +365,9 @@ class Service:
                     pass
                 return {"ok": False, "msg": f"连接失败: {e}"}
 
+        finally:
+            self._conn_lock.release()
+
     def _fastest(self):
         # Only a real, sane latency counts: a stale 0/None or a 20-second "alive" would be picked first and
         # make every download crawl.
@@ -349,13 +377,55 @@ class Service:
         nodes.sort(key=lambda n: n.get("delay", 9999))
         return nodes[0]["name"]
 
+    def _exit_candidates(self, exclude=(), limit=4) -> list:
+        """换线候选：优先用池子里已测速且延迟低的节点。
+
+        旧逻辑换线只走 _quick_pick（现场探测池子前 240 条），那一批多是失效的 vless/vmess，
+        于是“换线还是失败”。测速得到的结果才是可信来源，这里先吃它。
+        """
+        tried = {x for x in exclude if x}
+        nodes = [n for n in self.nodes() if isinstance(n.get("delay"), int) and 0 < n["delay"] <= 3000]
+        nodes.sort(key=lambda n: n.get("delay", 9999))
+        return [n["name"] for n in nodes if n["name"] not in tried][: int(limit)]
+
+    def _switch_and_verify(self, exclude=(), attempts=3) -> tuple:
+        """逐个尝试候选节点直到出口连通；失败的节点在池中标记失效，避免下次又选中它。"""
+        tried = [x for x in exclude if x]
+        while len(tried) <= attempts:
+            cand = self._exit_candidates(exclude=tried, limit=1)
+            if not cand:
+                quick = self._quick_pick(limit=72, timeout=2500, exclude=tried[-1] if tried else "")
+                cand = [quick] if quick else []
+            if not cand:
+                break
+            name = cand[0]
+            tried.append(name)
+            if not self.core.select(C.GROUP_SELECT, name):
+                self._log(f"[core] 线路选择失败 {name}")
+                continue
+            time.sleep(0.35)
+            # 单次换线校验压到 4s：4 个候选 × 5s 就是 20 秒白屏等待，用户只会觉得“点了没反应”
+            ok, detail = self._verify_exit(timeout=4)
+            self._log(f"[core] 换线 {name} → {'出口连通' if ok else '仍不通(' + detail + ')'}")
+            if ok:
+                self.settings["node"] = name
+                self.save_settings()
+                return True, detail, name
+            dead = self.node_by_name(name)
+            if dead:
+                dead["delay"] = None
+        return False, "所有候选线路均不通", ""
+
     def _save_delays(self, mapping):
         for n in self.nodes():
             if n["name"] in mapping:
                 n["delay"] = mapping[n["name"]] or None
 
-    def _delay_many(self, names, workers=48, timeout=4000, progress=None, core=None):
-        """并发逐节点测速，返回 {name: delay}。"""
+    def _delay_many(self, names, workers=48, timeout=4000, progress=None, core=None, on_result=None):
+        """并发逐节点测速，返回 {name: delay}。
+
+        on_result(name, delay) 每测出一条可用线路就回调一次：测速动辄几分钟，
+        旧实现只在全部结束后才写池，中途界面一条结果都看不到。"""
         import concurrent.futures as cf
         core = core or self.core
         out = {}
@@ -374,6 +444,11 @@ class Service:
                         d = None
                     if d:
                         out[futs[f]] = int(d)
+                        if on_result:
+                            try:
+                                on_result(futs[f], int(d))
+                            except Exception:
+                                pass
                     done += 1
                 if progress:
                     progress(done, total)
@@ -454,7 +529,7 @@ class Service:
         self._log(f"[sys] 系统代理{'已接管 ' if ok else '接管失败 '}{server}")
         return ok
 
-    def _verify_exit(self, timeout=8, rounds=2) -> tuple:
+    def _verify_exit(self, timeout=5, rounds=1) -> tuple:
         """通过本地混合端口做出口探测，判断代理是否真的能用（多轮重试）。"""
         port = self.core.mixed_port
         if not port:
@@ -468,23 +543,54 @@ class Service:
             last = detail
             if rnd + 1 < rounds:
                 time.sleep(1.0)
+        # HTTP 探测全灭不等于这条线真不通（不同网络对境外 204 端点差异极大）。
+        # 再用内核自己的延迟探测兜底：只要 mihomo 能测出延迟，就说明链路是通的，
+        # 不要因为几个 204 端点超时就把用户判成“出口连接失败”然后无限换线。
+        try:
+            cur = self.core.current()
+            if cur:
+                d = self.core.delay(cur, timeout=6000)
+                if d:
+                    return True, f"内核探测 {d}ms"
+        except Exception:
+            pass
         return False, last or "无响应"
 
     def _verify_once(self, px, timeout=8) -> tuple:
-        last = ""
-        sess = requests.Session()
-        sess.trust_env = False          # 只用内核端口，别被系统里的坏代理干扰
-        for url in ("https://www.gstatic.com/generate_204",
-                    "http://connectivitycheck.platform.hicloud.com/generate_204",
-                    "https://cp.cloudflare.com/generate_204"):
+        """多端点并发探测：任一返回 204/200 即算出口连通。
+
+        旧实现串行抢 3 个境外 204 端点，弱线路下最坏要白等 15s 以上，用户看到的是
+        “连接中”长时间不动、最后提示出口失败。
+        """
+        import concurrent.futures as cf
+        urls = ("https://www.gstatic.com/generate_204",
+                "http://connectivitycheck.platform.hicloud.com/generate_204",
+                "https://cp.cloudflare.com/generate_204",
+                "http://www.msftconnecttest.com/connecttest.txt")
+
+        def probe(url):
+            sess = requests.Session()
+            sess.trust_env = False      # 只用内核端口，别被系统里的坏代理干扰
             try:
                 r = sess.get(url, proxies=px, timeout=timeout, allow_redirects=False)
                 if r.status_code in (200, 204):
                     return True, f"HTTP {r.status_code}"
-                last = f"HTTP {r.status_code}"
+                return False, f"HTTP {r.status_code}"
             except Exception as e:
-                last = type(e).__name__
-        return False, last or "无响应"
+                return False, type(e).__name__
+
+        ex = cf.ThreadPoolExecutor(max_workers=len(urls))
+        try:
+            futs = [ex.submit(probe, u) for u in urls]
+            first_fail = ""
+            for f in cf.as_completed(futs):
+                ok, detail = f.result()
+                if ok:
+                    return True, detail
+                first_fail = first_fail or detail
+            return False, first_fail or "无响应"
+        finally:
+            ex.shutdown(wait=False)
 
     def disconnect(self) -> dict:
         with self._lock:
@@ -536,24 +642,67 @@ class Service:
         return {"ok": True}
 
     def select_node(self, name: str) -> dict:
+        """选线路：一律异步执行，立刻返回。
+
+        旧实现同步跑「切换 + 出口校验 + 失败换线」，最长能卡近一分钟，前端 await
+        不返回，用户看到的就是“点了连接/换线没反应、还是在提示失败”。
+        """
         node = self.node_by_name(name)
         if not node:
             return {"ok": False, "msg": "节点不存在"}
         self.settings["node"] = name
         self.save_settings()
-        if self.core.alive():
-            ok = self.core.select(C.GROUP_SELECT, name)
-            self._log(f"[core] 切换线路 -> {name}")
-            return {"ok": ok, "node": name}
-        return {"ok": True, "node": name}
 
+        if not self.core.alive():
+            # 未连接时选线路就是“连这条线”，不要只存设置让用户再点一次连接
+            def _connect_this():
+                try:
+                    self.connect(name)
+                except Exception as e:
+                    self._log(f"[core] 选线连接异常 {type(e).__name__}: {e}")
+            threading.Thread(target=_connect_this, daemon=True).start()
+            return {"ok": True, "pending": True, "node": name, "msg": f"正在连接 {name}…"}
+
+        def _switch():
+            try:
+                ok = self.core.select(C.GROUP_SELECT, name)
+                self._log(f"[core] 切换线路 -> {name}")
+                if not ok:
+                    self.task = {"running": False, "kind": "switch",
+                                 "msg": f"内核拒绝切换到 {name}", "progress": 0}
+                    return
+                ok_exit, detail = self._verify_exit()
+                if ok_exit:
+                    self.task = {"running": False, "kind": "switch",
+                                 "msg": f"已切换到 {name}", "progress": 100}
+                    self._log(f"[core] 已切换到 {name}，出口连通")
+                    return
+                self._log(f"[core] {name} 出口不通（{detail}），自动换线")
+                ok2, detail2, switched = self._switch_and_verify(exclude=[name], attempts=3)
+                if ok2:
+                    self.task = {"running": False, "kind": "switch",
+                                 "msg": f"{name} 出口不通，已自动换到 {switched}", "progress": 100}
+                    self._log(f"[core] {name} 出口不通，已自动换到 {switched}")
+                else:
+                    # 候选全灭也不代表当前这条不能用：探针超时常见于弱线路。
+                    # 报“切换失败”会让用户以为没法用，实际线路已经切过去了。
+                    self.task = {"running": False, "kind": "switch",
+                                 "msg": f"已切到 {name}，出口校验未通过，可再换一条试试", "progress": 100}
+                    self._log(f"[core] 已切到 {name}，候选线路探针均未通过（{detail2}）")
+            except Exception as e:
+                self.task = {"running": False, "kind": "switch", "msg": f"切换失败: {e}", "progress": 0}
+                self._log(f"[core] 切换线路异常 {type(e).__name__}: {e}")
+
+        self.task = {"running": True, "kind": "switch", "msg": f"正在切换线路 {name}…", "progress": 20}
+        threading.Thread(target=_switch, daemon=True).start()
+        return {"ok": True, "pending": True, "node": name, "msg": f"正在切换线路 {name}…"}
     def set_group(self, group: str, value: str) -> dict:
         if self.core.alive():
             return {"ok": self.core.select(group, value)}
         return {"ok": False}
 
     # ------------------------------------------------------------ 节点列表
-    def node_list(self):
+    def node_list(self, head: int | None = None):
         out = []
         for n in self.nodes():
             out.append({
@@ -567,6 +716,9 @@ class Service:
             })
         # 已测速且延迟低的排前面，未测速的排后面
         out.sort(key=lambda x: (0 if x["delay"] else 1, x["delay"] or 99999))
+        if head:
+            # 首屏只发前 head 条：2500 条整体注入 WebView 是首次打开卡死的直接原因之一
+            return out[: int(head)]
         return out
 
     def maybe_autotest(self):
@@ -582,40 +734,96 @@ class Service:
             return False
         self.settings["last_autotest"] = time.time()
         self.save_settings()
-        self._log("[speed] 节点池未测速较多，自动开始后台测速")
-        self.test_speed()
+        # 自动轮只测一小批（默认 260 条）：首次打开时 900 条 × 40 线程会把 WebView 首帧拖死，
+        # 用户看到的就是“第一次打开必卡死，关掉重开才好”。剩下的用户自己点测速补。
+        auto_batch = int(self.settings.get("auto_speed_batch", 260) or 260)
+        todo = [n["name"] for n in nodes if not isinstance(n.get("delay"), int)][:auto_batch]
+        if not todo:
+            return False
+        self._log(f"[speed] 节点池未测速较多，自动测速 {len(todo)} 条")
+        self.test_speed(names=todo)
         return True
 
     def test_speed(self, names=None):
         """后台测速：返回任务状态。"""
-        if self.task.get("running"):
+        if self.task.get("running") and self.task.get("kind") != "speed":
             return {"ok": False, "msg": "已有任务在运行"}
+        if self.task.get("running") and self.task.get("kind") == "speed":
+            return {"ok": False, "msg": "测速进行中"}
         self.task = {"running": True, "kind": "speed", "msg": "正在测速…", "progress": 5}
+        self.speed = {"running": True, "msg": "正在测速…", "ok_count": 0,
+                      "seq": int(self.speed.get("seq", 0))}
 
         def run():
             tmp = None
             try:
-                targets = names or [n["name"] for n in self.nodes()]
+                if names:
+                    targets = list(names)
+                else:
+                    # 先把“没测过 / 已知失效”的节点补测，已测的延后，避免反复测同一批
+                    allnodes = self.nodes()
+                    todo = [n["name"] for n in allnodes if not isinstance(n.get("delay"), int)]
+                    done = [n["name"] for n in allnodes if isinstance(n.get("delay"), int)]
+                    budget = int(self.settings.get("speed_budget", 900) or 900)
+                    targets = (todo[:budget] + done[: max(0, budget - len(todo[:budget]))])
+                total = max(len(targets), 1)
+                self._log(f"[speed] 开始测速，共 {total} 条")
                 core = self.core
                 if not self.core.alive():
                     self.task["msg"] = "启动临时内核…"
                     tmp = C.Core(self.core_exe, self.home, log_cb=lambda m: None)
-                    tmp.build(self.nodes(), mode="rule", compact_groups=True)
+                    # 端口必须随机：固定 7890 会和已连接的主内核抢端口，导致测速期间连不了线
+                    tmp.build(self.nodes(), mode="rule", compact_groups=True,
+                              prefer_port=C.pick_port(20000, 20000))
                     tmp.start()
+                    if not tmp.alive():
+                        raise RuntimeError("测速内核未就绪")
                     core = tmp
+                    self.task["progress"] = 10
 
-                def progress(done, total):
-                    self.task["msg"] = f"测速中 {done}/{total}"
-                    self.task["progress"] = min(95, int(done * 95 / max(total, 1)))
+                acc = {}
+                last_flush = [0.0]
 
-                res = self._delay_many(targets, workers=56, timeout=4000, progress=progress, core=core)
+                def progress(done_n, total_n):
+                    self.task["msg"] = f"测速中 {done_n}/{total_n}，已出 {len(acc)} 条"
+                    self.task["progress"] = min(95, int(done_n * 95 / max(total_n, 1)))
+                    self.speed["msg"] = self.task["msg"]
+                    self.speed["ok_count"] = len(acc)
+                    # 每 3 秒把已测出的延迟落进池子：边测边能在列表里看到可用线路
+                    now = time.time()
+                    if acc and now - last_flush[0] >= 3.0:
+                        last_flush[0] = now
+                        try:
+                            self._save_delays(dict(acc))
+                            P.save(self.pool_path, self.nodes(), meta=self.pool.get("meta", {}))
+                        except Exception:
+                            pass
+
+                def on_result(name, delay):
+                    acc[name] = delay
+
+                res = self._delay_many(targets, workers=40, timeout=4000, progress=progress,
+                                       core=core, on_result=on_result)
                 self._save_delays(res)
                 P.save(self.pool_path, self.nodes(), meta=self.pool.get("meta", {}))
                 self.pool = P.load(self.pool_path)
-                self.task = {"running": False, "kind": "speed", "msg": "测速完成", "progress": 100}
+                done_msg = f"测速完成，可用 {len(res)} 条"
+                self.speed = {"running": False, "msg": done_msg, "ok_count": len(res),
+                              "seq": int(self.speed.get("seq", 0)) + 1}
+                if self.task.get("kind") == "speed":
+                    self.task = {"running": False, "kind": "speed", "msg": done_msg,
+                                 "progress": 100, "ok_count": len(res)}
+                else:
+                    # 测速期间用户点了连接/换线，别把人家正在跑的状态覆盖成“测速完成”
+                    self.speed_done_msg = done_msg
                 self._log(f"[speed] 测速完成，可用 {len(res)} 条")
             except Exception as e:
-                self.task = {"running": False, "kind": "speed", "msg": f"测速失败: {e}", "progress": 0}
+                self.speed = {"running": False, "msg": f"测速失败: {e}", "ok_count": 0,
+                              "seq": int(self.speed.get("seq", 0)) + 1}
+                if self.task.get("kind") == "speed":
+                    self.task = {"running": False, "kind": "speed", "msg": f"测速失败: {e}", "progress": 0}
+                else:
+                    self.speed_done_msg = f"测速失败: {e}"
                 self._log(f"[speed] 失败 {e}")
             finally:
                 if tmp is not None:

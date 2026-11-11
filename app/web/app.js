@@ -111,6 +111,8 @@ function mockApi() {
     logs: async () => st.logs,
     win_min: async () => { }, win_max: async () => { }, win_close: async () => { },
     drag: async () => { }, resize_edge: async () => { },
+    win_pos: async () => ({ ok: false }), win_move: async () => ({ ok: false }),
+    node_page: async () => ({ ok: true, nodes: st.nodes || [] }),
     open_url: async () => { }, copy: async () => { },
     set_autostart: async () => ({ ok: true }), set_auto_connect: async () => ({ ok: true }),
     restart_core: async () => ({ ok: true }), live_logs: async () => st.logs,
@@ -118,9 +120,19 @@ function mockApi() {
   };
 }
 
+function withTimeout(pr, ms, fallback) {
+  return Promise.race([pr, new Promise((res) => setTimeout(() => res(fallback), ms))]);
+}
+
 async function boot() {
   try {
-    const data = await API.bootstrap();
+    // 首屏等后端太久＝白屏"卡死"，给超时兜底并重试
+    const data = await withTimeout(API.bootstrap(), 8000, null);
+    if (!data) {
+      toast('后端响应较慢，正在重试…', 'err');
+      setTimeout(boot, 1500);
+      return;
+    }
     STATE = data.state;
     NODES = data.nodes || [];
     const _kvHome = $('#kvHome');
@@ -129,6 +141,8 @@ async function boot() {
     if (data.state && data.state.repo && _kvRepo) _kvRepo.textContent = 'github.com/' + data.state.repo;
     paint();
     startPolling();
+    // 告诉后端首屏已经出来了：自动连接/重活都排在这之后，避免开机抢资源把窗口卡住
+    if (API && API.ready) { try { API.ready(); } catch (e) { /* ignore */ } }
     setTimeout(() => checkUpdate(true), 2500);
   } catch (e) {
     console.error(e);
@@ -142,12 +156,48 @@ function startPolling() {
 }
 
 async function tick() {
+  // 窗口不可见时不拉状态，省下的开销还给界面
+  if (document.hidden) return;
   try {
     const s = await API.state();
     if (!s) return;
     STATE = s;
     paint();
+    // 测速要跑好几分钟。旧版只在全部结束时刷列表，中途用户一条“测好的线路”都看不到，
+    // 也没法挑一条连。这里测速进行中每 4 秒轻量回刷一次（只取前 400 条），结果边测边冒出来。
+    const sp = s.speed || {};
+    if (sp.running && Date.now() - lastLiveReload > 4000) {
+      lastLiveReload = Date.now();
+      liveReloadNodes();
+    }
   } catch (e) { /* ignore */ }
+}
+
+let lastLiveReload = 0;
+let liveReloadBusy = false;
+async function liveReloadNodes() {
+  if (MOCK || liveReloadBusy) return;
+  liveReloadBusy = true;
+  try {
+    // 只取前 240 条（后端已按延迟排序，测出来的线路就排在最前面），避免每次回刷把 2500 条 JSON 灌进 WebView
+    const r = await API.node_page(0, 240);
+    const list = (r && (r.nodes || (Array.isArray(r) ? r : null))) || null;
+    if (list && list.length) {
+      if (allNodesLoaded) {
+        // 已经拉过全量列表时不能在测速中途被 240 条覆盖掉（否则搜索/翻页会丢节点），只把新测到的延迟合并进去
+        const byName = {};
+        list.forEach((n) => (byName[n.name] = n));
+        NODES.forEach((n) => {
+          const hit = byName[n.name];
+          if (hit && hit.delay) n.delay = hit.delay;
+        });
+      } else {
+        NODES = list;
+      }
+      renderNodeTable();
+    }
+  } catch (e) { /* ignore */ }
+  liveReloadBusy = false;
 }
 
 /* ---------------------------------------------------------------- 渲染 */
@@ -155,6 +205,7 @@ function paint() {
   const s = STATE;
   if (!s) return;
   try { watchConnect(s); } catch (e) { /* ignore */ }
+  try { watchTask(s); } catch (e) { /* ignore */ }
 
   $('#verText').textContent = s.version;
   $$('.ver-inline').forEach((e) => (e.textContent = s.version));
@@ -484,6 +535,60 @@ function closeDrawer() {
 
 /* ---------------------------------------------------------------- 动作 */
 let prevConnected = null;
+let prevTask = null;
+
+let prevSpeedSeq = null;
+let prevSpeedRunning = false;
+
+/** 测速结束后自动把结果刷进列表。
+ *  注意：测速状态用 state.speed 判断，不能用 state.task —— 测速期间用户点连接会把 task
+ *  改成 connect，只盯 task 就永远等不到“测速结束”，于是“测好了也看不到已测速线路”。*/
+async function watchTask(painted) {
+  const t = (painted && painted.task) || {};
+  const sp = (painted && painted.speed) || {};
+  if (sp.seq !== undefined) {
+    const running = !!sp.running;
+    if (prevSpeedSeq === null) {
+      prevSpeedSeq = sp.seq; prevSpeedRunning = running;
+    } else if (sp.seq !== prevSpeedSeq || (prevSpeedRunning && !running)) {
+      prevSpeedSeq = sp.seq; prevSpeedRunning = running;
+      allNodesLoaded = false;
+      await loadAllNodes(true);
+      renderNodeTable(); renderDrawer();
+      toast(sp.msg || '测速完成', sp.ok_count ? 'ok' : '');
+      return;
+    } else {
+      prevSpeedRunning = running;
+    }
+  }
+  const snapshot = `${t.kind || ''}:${t.running ? 1 : 0}`;
+  if (prevTask === null) { prevTask = snapshot; return; }
+  if (prevTask === snapshot) return;
+  const wasRunning = prevTask && prevTask.endsWith(':1');
+  prevTask = snapshot;
+  if (!wasRunning || t.running) return;
+  if (t.kind === 'refresh') {
+    allNodesLoaded = false;
+    await loadAllNodes(true);
+    renderNodeTable(); renderDrawer();
+  }
+}
+
+let allNodesLoaded = false;
+/** 首屏只拿到前 240 条节点，节点页/搜索需要全量时再一次性拉过来。*/
+async function loadAllNodes(force) {
+  if (MOCK) return;
+  if (allNodesLoaded && !force) return;
+  try {
+    const r = await API.node_page(0, 0);
+    if (r && r.ok && r.nodes && r.nodes.length) {
+      NODES = r.nodes;
+      allNodesLoaded = true;
+      renderNodeTable();
+    }
+  } catch (e) { /* ignore */ }
+}
+
 function watchConnect(painted) {
   const now = !!(painted && painted.connected);
   if (prevConnected === null) { prevConnected = now; return; }
@@ -499,30 +604,40 @@ function watchConnect(painted) {
 
 async function doToggle() {
   if (MOCK) { toast(STATE.connected ? '已断开' : '已连接'); STATE.connected = !STATE.connected; paint(); return; }
-  if (STATE && STATE.task && STATE.task.running) { toast('任务进行中，请稍候', 'err'); return; }
+  const t = (STATE && STATE.task) || {};
+  // 测速/换线都是后台任务，不该拦住连接：旧代码一律拦下，用户看着进度条却点不动连接
+  if (t.running && t.kind !== 'speed' && t.kind !== 'switch') { toast('任务进行中，请稍候', 'err'); return; }
   const wasConnected = !!(STATE && STATE.connected);
-  $('#btnConnect').classList.add('busy');
-  $('#connBtnText').textContent = wasConnected ? '正在断开…' : '正在连接…';
+  const btn = $('#btnConnect');
+  // 连接要跑内核启动 + 出口校验，动辄十几秒。旧代码整段时间把按钮 busy（CSS 里 pointer-events:none），
+  // 用户点了没反应又点不动，只能干等。这里只在“断开”时短暂上锁，连接全程保持可点。
+  if (wasConnected) {
+    btn.classList.add('busy');
+    $('#connBtnText').textContent = '正在断开…';
+  } else {
+    $('#connBtnText').textContent = '正在连接…';
+  }
   try {
     const r = wasConnected ? await API.disconnect() : await API.connect();
     if (!r.ok) toast(r.msg || '操作失败', 'err');
     else if (r.pending) toast(r.msg || (wasConnected ? '正在断开…' : '正在连接，请稍候…'));
     else if (wasConnected) toast('已断开连接');
     else if (r.sys_proxy === false && STATE && STATE.sys_proxy_setting) toast('已连接，但系统代理未接管，请到设置检查', 'err');
-    else toast('连接成功');
+    else toast(r.msg || '连接成功');
     const s = await API.state();
     STATE = s; paint();
   } catch (e) { toast('操作失败: ' + e, 'err'); }
-  $('#btnConnect').classList.remove('busy');
+  btn.classList.remove('busy');
 }
 
 async function selectNode(name) {
   try {
     const r = await API.select_node(name);
-    if (r.ok) {
-      const s = await API.state(); STATE = s; paint();
-      toast('已切换线路');
-    } else toast(r.msg || '切换失败', 'err');
+    if (r && r.ok) {
+      toast(r.msg || '已切换线路');
+      // 后端改成异步：切换/出口校验在后台跑，进度靠轮询刷新
+      if (!r.pending) { STATE = await API.state(); paint(); }
+    } else toast((r && r.msg) || '切换失败', 'err');
   } catch (e) { toast('切换失败: ' + e, 'err'); }
 }
 
@@ -538,11 +653,9 @@ async function testAll() {
   try {
     const r = await API.test_speed();
     if (!r.ok) return toast(r.msg || '任务进行中', 'err');
-    toast('开始测速…');
-    setTimeout(async () => {
-      NODES = await API.nodes();
-      renderNodeTable(); renderDrawer();
-    }, 1200);
+    toast('开始测速，结果会自动刷新到列表…');
+    // 不再 1.2s 后抢跑拉一次：那时测速还没结束，拉到的是没延迟的空数据。
+    // 测速结束由 watchTask 统一刷新。
   } catch (e) { toast('启动失败: ' + e, 'err'); }
 }
 
@@ -571,7 +684,7 @@ function bindEvents() {
     $$('.page').forEach((p) => p.classList.remove('active'));
     const el = $('#page-' + page);
     if (el) el.classList.add('active');
-    if (page === 'nodes') { renderNodeTable(); }
+    if (page === 'nodes') { loadAllNodes(); renderNodeTable(); }
     if (page === 'logs') {
       $('#logBox').textContent = (STATE && STATE.logs || []).join('\n');
     }
@@ -581,10 +694,53 @@ function bindEvents() {
   $('#btnMin').onclick = () => API && API.win_min();
   $('#btnMax').onclick = () => API && API.win_max();
   $('#btnClose').onclick = () => API && API.win_close();
-  $('#titlebar').addEventListener('mousedown', (e) => {
+  // 窗口拖动：只用「自定义拖动」这一条通道（记录屏幕坐标 + SetWindowPos 跟随）。
+  // 旧版先试 Win32 的 ReleaseCapture+SendMessage(WM_NCLBUTTONDOWN)，那玩意儿一旦接管鼠标捕获，
+  // mousemove/mouseup/click 全都不再派发给页面：表现就是“窗口拖不动、右上角按钮点了没反应”。
+  // 单通道反而稳：未越过 4px 阈值时完全不动鼠标，单击照常派发。
+  let dragState = null;
+  let dragSeq = 0;
+  $('#titlebar').addEventListener('mousedown', async (e) => {
     if (e.target.closest('button, a, input')) return;
-    if (API) API.drag();
+    if (typeof e.button === 'number' && e.button !== 0) return;
+    if (!API) return;
+    const seq = ++dragSeq;
+    const st = { sx: e.screenX, sy: e.screenY, moved: false, wx: 0, wy: 0, tx: 0, ty: 0, t: 0 };
+    dragState = st;
+    try {
+      const pos = await API.win_pos();
+      // 期间用户可能已松手或又按下一次，别把旧坐标写进新状态
+      if (pos && pos.ok && dragState === st && seq === dragSeq) {
+        st.wx = pos.x; st.wy = pos.y; st.tx = pos.x; st.ty = pos.y;
+        st.scale = pos.scale || 1;
+        st.ready = true;
+      } else if (dragState === st) {
+        // 拿不到窗口坐标就别拖：否则 tx/ty 从 0 起算，窗口会直接跳到屏幕左上角
+        dragState = null;
+      }
+    } catch (err) {
+      if (dragState === st) dragState = null;
+    }
   });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragState || !dragState.ready) return;
+    const dx = e.screenX - dragState.sx;
+    const dy = e.screenY - dragState.sy;
+    if (!dragState.moved) {
+      if (Math.abs(dx) + Math.abs(dy) < 4) return;   // 阈值内还算单击
+      dragState.moved = true;
+    }
+    const now = Date.now();
+    if (dragState.t && now - dragState.t < 8) return;   // 节流，避免 IPC 打满
+    dragState.t = now;
+    const sc = dragState.scale || 1;   // CSS px → 物理 px
+    dragState.tx = dragState.wx + dx * sc;
+    dragState.ty = dragState.wy + dy * sc;
+    try { API.win_move(dragState.tx, dragState.ty); } catch (err) { /* ignore */ }
+  });
+  const endDrag = () => { dragState = null; };
+  window.addEventListener('mouseup', endDrag);
+  window.addEventListener('blur', endDrag);
   $('#titlebar').addEventListener('dblclick', (e) => {
     if (e.target.closest('button, a, input')) return;
     if (API) API.win_max();
@@ -648,7 +804,7 @@ function bindEvents() {
   $('#drawerTest').onclick = testAll;
   $('#drawerRefresh').onclick = refreshPool;
 
-  $('#nodeSearch').oninput = (e) => { searchText = e.target.value.trim(); nodeLimit = 120; renderNodeTable(); };
+  $('#nodeSearch').oninput = (e) => { searchText = e.target.value.trim(); nodeLimit = 120; loadAllNodes(); renderNodeTable(); };
   $('#countryChips').onclick = (e) => {
     const c = e.target.closest('.chip');
     if (!c) return;
