@@ -65,8 +65,18 @@ if (-not (Test-Path $dist)) { throw "dist folder missing: $dist" }
 
 # PyInstaller onedir 会把 --add-data 放进 _internal。逐字节核对打包页面，
 # 防止 exe 已经更新、界面却仍是旧 HTML/CSS/JS 的半新包流入发布目录。
-python -c $assetCheck $root $dist
-if ($LASTEXITCODE -ne 0) { throw "web asset verification failed" }
+# 校验脚本写入临时文件再执行：PowerShell 5.1 直接向 python -c 传多行字符串会吞掉引号，
+# 在 CI 上把 {".html"} 变成 {.html} 而报语法错误。
+$assetCheckPath = Join-Path ([IO.Path]::GetTempPath()) "quchen-web-assets-check.py"
+Set-Content -LiteralPath $assetCheckPath -Value $assetCheck -Encoding UTF8
+$assetCheckCode = 0
+try {
+    python $assetCheckPath $root $dist
+    $assetCheckCode = $LASTEXITCODE
+} finally {
+    Remove-Item -LiteralPath $assetCheckPath -Force -ErrorAction SilentlyContinue
+}
+if ($assetCheckCode -ne 0) { throw "web asset verification failed" }
 
 $rel = Join-Path $root "release"
 New-Item -ItemType Directory -Force -Path $rel | Out-Null
