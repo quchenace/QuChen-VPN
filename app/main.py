@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import ctypes
 import functools
+import html as html_lib
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -417,6 +419,8 @@ class Api:
         表现就是第一次打开必卡死，关掉重开（内核已在跑）反而正常。"""
         evt = getattr(self, "ready_evt", None)
         if evt is not None:
+            if not evt.is_set():
+                self.svc._log("[app] 首屏真实渲染完成")
             evt.set()
         try:
             _clear_boot_guard()
@@ -543,26 +547,60 @@ def _icon_path(base: str) -> str:
     return ""
 
 
+def _locate_web_index() -> tuple[str, list[str]]:
+    """按打包布局定位界面；onedir 内置资源优先于 exe 旁的旧兼容目录。"""
+    if getattr(sys, "frozen", False):
+        roots = [getattr(sys, "_MEIPASS", "") or "", os.path.dirname(sys.executable)]
+    else:
+        roots = [os.path.dirname(os.path.abspath(__file__))]
+    candidates = list(dict.fromkeys(
+        os.path.normpath(os.path.join(root, "web", "index.html")) for root in roots if root))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path, candidates
+    return "", candidates
+
+
+def _missing_web_html(candidates: list[str]) -> str:
+    paths = "\n".join(html_lib.escape(p) for p in candidates) or "（无可用路径）"
+    return f"""<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>
+<title>QuChen VPN - 界面资源错误</title></head><body style='margin:0;background:#f7f9fc;color:#0f1e38;font-family:Microsoft YaHei UI,sans-serif'>
+<main style='max-width:760px;margin:12vh auto;padding:32px;background:white;border:1px solid #e3e9f2;border-radius:12px'>
+<h1 style='font-size:22px'>界面资源未找到</h1>
+<p>未找到 web/index.html，程序没有回退到其他目录。请重新解压完整便携包后重试。</p>
+<p>已检查以下位置：</p><pre style='white-space:pre-wrap;word-break:break-all;color:#b42318'>{paths}</pre>
+<button onclick='location.reload()' style='padding:10px 22px;border:0;border-radius:8px;background:#3b81ff;color:white;cursor:pointer'>重试</button>
+</main></body></html>"""
+
+
 def main():
     if not _acquire_instance():
         return
     start_min = "--min" in sys.argv
     if _arm_boot_guard():
-        # 上次首屏没渲染完，本次禁用 GPU 合成兜底（正常启动不会带这个参数）
-        os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = "--disable-gpu"
+        # 上次首屏没渲染完，本次禁用 GPU 合成兜底；保留调用方已有的 WebView2 参数。
+        browser_args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+        if "--disable-gpu" not in browser_args.split():
+            os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
+                browser_args + " --disable-gpu").strip()
     svc = Service()
+    # js_api 只暴露 Api 方法；不要让 pywebview 递归遍历 Service/Core/requests 内部对象图。
+    svc._serializable = False
     svc._log(f"[app] {APP_TITLE} v{APP_VER} 启动")
     api = Api(svc)
     base = svc.base
-    html = os.path.join(base, "web", "index.html")
-    if getattr(sys, "frozen", False):
-        html = os.path.join(os.path.dirname(sys.executable), "web", "index.html")
-    if not os.path.exists(html):
-        html = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "index.html")
+    html_path, web_candidates = _locate_web_index()
+    if html_path:
+        svc._log(f"[app] 界面资源 {html_path}")
+        # pywebview 的本地 HTTP 服务也使用 http:，片段供前端识别桌面页面并禁用 mock。
+        page = {"url": html_path + "#quchen-desktop"}
+    else:
+        searched = "；".join(web_candidates) or "无可用路径"
+        svc._log(f"[app] 界面资源缺失，已检查：{searched}")
+        page = {"html": _missing_web_html(web_candidates)}
 
     window = webview.create_window(
         APP_TITLE,
-        url=html,
         js_api=api,
         width=1000,
         height=680,
@@ -572,7 +610,9 @@ def main():
         background_color="#FFFFFF",
         text_select=False,
         confirm_close=False,
+        **page,
     )
+    window._serializable = False
     api.window = window
 
     def stats_loop():
@@ -586,6 +626,7 @@ def main():
     threading.Thread(target=stats_loop, daemon=True).start()
 
     ready_evt = threading.Event()
+    ready_evt._serializable = False
     api.ready_evt = ready_evt
 
     def autoconnect():
@@ -611,11 +652,18 @@ def main():
             except Exception:
                 pass
 
+    # private_mode=False 时 pywebview 默认固定 42001；旧实例占用该端口会让新窗口误读旧 HTML/JS。
+    # 显式选择空闲端口，既避免跨实例串用资源，也保留 WebView 存储持久化。
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        http_port = sock.getsockname()[1]
+
     try:
         webview.start(
             _started,
             debug=False,
             gui="edgechromium",
+            http_port=http_port,
             private_mode=False,
             storage_path=os.path.join(svc.home, "webview"),
             icon=icon or None,

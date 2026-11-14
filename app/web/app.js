@@ -5,6 +5,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 // 设置入口：用于显示更新红点（此前未定义，paintUpdate 会在此抛 ReferenceError）
 const navBtn = document.querySelector('.nav-item[data-page="settings"]');
+const IS_DESKTOP_PAGE = location.protocol === 'file:' || location.hash === '#quchen-desktop';
 
 let API = null;
 let STATE = null;
@@ -75,6 +76,9 @@ else window.addEventListener('pywebviewready', bridgeReady);
 
 /* 浏览器内预览（无 pywebview 时用假数据，保证界面可独立调试） */
 function mockApi() {
+  if (IS_DESKTOP_PAGE || !/^https?:$/.test(location.protocol)) {
+    throw new Error('演示模式仅限 HTTP 浏览器预览，桌面/本地页面必须连接本地后端');
+  }
   MOCK = true;
   const nodes = [];
   const countries = [['🇭🇰', '香港'], ['🇯🇵', '日本'], ['🇸🇬', '新加坡'], ['🇺🇸', '美国'], ['🇩🇪', '德国'], ['🇰🇷', '韩国']];
@@ -116,37 +120,60 @@ function mockApi() {
     open_url: async () => { }, copy: async () => { },
     set_autostart: async () => ({ ok: true }), set_auto_connect: async () => ({ ok: true }),
     restart_core: async () => ({ ok: true }), live_logs: async () => st.logs,
+    ready: async () => ({ ok: true }),
     set_theme: async (t) => { st.theme = t; return { ok: true }; },
   };
 }
 
-function withTimeout(pr, ms, fallback) {
-  return Promise.race([pr, new Promise((res) => setTimeout(() => res(fallback), ms))]);
+function withTimeout(pr, ms, label) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`${label}超时（${Math.ceil(ms / 1000)} 秒）`)), ms);
+    Promise.resolve(pr).then((value) => {
+      clearTimeout(timeout);
+      resolve(value);
+    }, (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
 }
 
+function bootErrorText(error) {
+  return error && error.message ? error.message : String(error || '未知错误');
+}
+
+let bootBusy = false;
 async function boot() {
+  if (bootBusy || !API) return;
+  bootBusy = true;
+  window.QuChenBoot.loading('正在加载界面…', MOCK ? '正在准备 HTTP 浏览器预览数据。' : '正在读取本地后端状态，请稍候。');
   try {
-    // 首屏等后端太久＝白屏"卡死"，给超时兜底并重试
-    const data = await withTimeout(API.bootstrap(), 8000, null);
-    if (!data) {
-      toast('后端响应较慢，正在重试…', 'err');
-      setTimeout(boot, 1500);
-      return;
-    }
+    if (typeof API.bootstrap !== 'function') throw new Error('桌面后端缺少 bootstrap 接口');
+    const data = await withTimeout(API.bootstrap(), 8000, '读取初始数据');
+    if (!data || !data.state) throw new Error('后端未返回有效的初始化状态');
     STATE = data.state;
     NODES = data.nodes || [];
     const _kvHome = $('#kvHome');
     if (data.home && _kvHome) _kvHome.textContent = data.home;
     const _kvRepo = $('#kvRepo');
-    if (data.state && data.state.repo && _kvRepo) _kvRepo.textContent = 'github.com/' + data.state.repo;
+    if (data.state.repo && _kvRepo) _kvRepo.textContent = 'github.com/' + data.state.repo;
     paint();
+
+    // 等 WebView 真正提交两帧后再通知后端；ready 本身也是 Promise，必须等待并捕获失败。
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    if (typeof API.ready !== 'function') throw new Error('当前后端缺少 ready 接口，请使用完整的新版本程序');
+    const readyResult = await withTimeout(API.ready(), 5000, '确认首屏就绪');
+    if (readyResult && readyResult.ok === false) throw new Error(readyResult.msg || '后端拒绝了首屏就绪确认');
+
+    window.QuChenBoot.done();
     startPolling();
-    // 告诉后端首屏已经出来了：自动连接/重活都排在这之后，避免开机抢资源把窗口卡住
-    if (API && API.ready) { try { API.ready(); } catch (e) { /* ignore */ } }
     setTimeout(() => checkUpdate(true), 2500);
   } catch (e) {
-    console.error(e);
-    toast('初始化失败: ' + e, 'err');
+    console.error('QuChen VPN boot failed:', e);
+    window.QuChenBoot.fail('初始化失败',
+      `原因：${bootErrorText(e)}\n界面尚未确认就绪，不会启动后台重任务。点击“重试”重新加载。`);
+  } finally {
+    bootBusy = false;
   }
 }
 
@@ -907,8 +934,20 @@ function bindEvents() {
   `;
   document.head.appendChild(style);
   bindEvents();
-  // 若 5 秒内 pywebview 未就绪，进入浏览器预览模式
-  // Only a real browser preview may fall back to demo data; the desktop app must keep waiting for the bridge.
-  const inBrowser = /^https?:$/.test(location.protocol);
-  setTimeout(() => { if (!_booted && inBrowser) { API = mockApi(); boot(); } else if (!_booted) { bridgeReady(); } }, 5000);
+  // pywebview 可能通过本地 HTTP 提供桌面页面；只有未带桌面标记的 HTTP(S) 才允许演示数据。
+  const inBrowser = !IS_DESKTOP_PAGE && /^https?:$/.test(location.protocol);
+  setTimeout(() => {
+    if (_booted) return;
+    if (inBrowser) {
+      _booted = true;
+      API = mockApi();
+      boot();
+      return;
+    }
+    bridgeReady();
+    if (!_booted) {
+      window.QuChenBoot.fail('本地后端尚未连接',
+        `未检测到 pywebview 桌面桥接。当前为桌面/本地页面（${location.protocol}），已禁止 mock 演示模式；请点击“重试”或重启程序。`);
+    }
+  }, 5000);
 })();

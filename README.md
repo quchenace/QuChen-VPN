@@ -1,6 +1,6 @@
 # QuChen VPN
 
-> 版本：v1.0.10 · [下载](https://github.com/quchenace/QuChen-VPN/releases/latest)
+> 版本：v1.0.12 · [下载](https://github.com/quchenace/QuChen-VPN/releases/latest)
 
 Windows 桌面代理客户端：聚合互联网公开的免费节点订阅源，自动测速去重，一键连接。
 界面参考 FlClash 类客户端的视觉语言，使用 **Python + WebView2 + mihomo 内核** 实现。
@@ -72,6 +72,14 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 可用性由第三方维护者决定，请遵守所在地区法律法规，自行承担使用风险。
 
 ## 更新日志
+
+### v1.0.12
+- 修复：打包后页面资源定位不到，首屏白屏；资源改为优先从 `_MEIPASS` 读取
+- 修复：页面写死 HTTP 端口，端口被占用时前端一直等不到后端；改为读取真实端口
+- 修复：后台任务在页面就绪前启动，挤占首屏；改为页面加载完成后再启动
+- 修复：前端在数据未就绪时短暂显示 mock 数据就判定启动成功；改为真实 ready 握手，超时才报错并给出重试
+- 构建：打包后对 HTML/CSS/JS 做 SHA-256 集合校验，避免旧资源混入安装包
+- 构建：版本 1.0.12
 
 ### v1.0.10
 - 修复：同服务器、同 UUID 但 WebSocket 路径 / gRPC 服务名 / REALITY short-id 不同的节点被当成重复项删掉，只剩第一个；去重指纹现在包含这些线路参数

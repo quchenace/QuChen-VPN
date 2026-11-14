@@ -5,8 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>QuChen VPN</title>
 <link rel="stylesheet" href="app.css?v=1.0.7" />
+<style>
+  /* 启动层不依赖 app.css/app.js：资源或后端失败时也不会只剩白屏。 */
+  #bootStatus{position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;background:#f7f9fc;color:#0f1e38;font-family:"Microsoft YaHei UI","Microsoft YaHei",sans-serif}
+  #bootStatus .boot-card{width:min(460px,calc(100vw - 48px));padding:32px;border:1px solid #e3e9f2;border-radius:16px;background:#fff;box-shadow:0 18px 48px rgba(15,30,56,.12);text-align:center}
+  #bootStatus .boot-brand{margin-bottom:18px;color:#3b81ff;font-size:15px;font-weight:700}
+  #bootStatus .boot-title{font-size:20px;font-weight:700}
+  #bootStatus .boot-detail{min-height:42px;margin:14px 0 22px;color:#7586a2;font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+  #bootStatus .boot-retry{height:36px;padding:0 22px;border:0;border-radius:8px;background:#3b81ff;color:#fff;cursor:pointer;font-size:13px}
+  #bootStatus.boot-error .boot-title{color:#d92d20}
+</style>
 </head>
 <body>
+<div id="bootStatus" role="status" aria-live="polite">
+  <div class="boot-card">
+    <div class="boot-brand">QuChen VPN</div>
+    <div class="boot-title" id="bootTitle">正在启动…</div>
+    <div class="boot-detail" id="bootDetail">正在连接本地服务，首次启动可能需要几秒钟。</div>
+    <button class="boot-retry" id="bootRetry" type="button" onclick="location.reload()">重试</button>
+  </div>
+</div>
 <svg style="display:none" xmlns="http://www.w3.org/2000/svg">
   <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v9" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" fill="none"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" fill="none"/></symbol>
   <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.7" fill="none"/><path d="M3 12h18M12 3c2.5 2.6 2.5 15.4 0 18M12 3c-2.5 2.6-2.5 15.4 0 18" stroke="currentColor" stroke-width="1.6" fill="none"/></symbol>
@@ -361,6 +379,46 @@
     <div class="task-bar"><div class="task-bar-fill" id="taskFill"></div></div>
   </div>
 </div>
+<script>
+(function () {
+  var settled = false;
+  var failed = false;
+  var layer = document.getElementById('bootStatus');
+  function show(title, detail, isError) {
+    if (settled) return;
+    failed = failed || isError;
+    layer.classList.toggle('boot-error', !!failed);
+    document.getElementById('bootTitle').textContent = title;
+    document.getElementById('bootDetail').textContent = detail;
+  }
+  function reason(value) {
+    if (value && value.message) return value.message;
+    return String(value || '未知错误');
+  }
+  window.QuChenBoot = {
+    loading: function (title, detail) { show(title, detail, false); },
+    fail: function (title, detail) { show(title, detail, true); },
+    done: function () {
+      settled = true;
+      layer.style.display = 'none';
+      document.documentElement.setAttribute('data-boot-ready', 'true');
+    }
+  };
+  window.addEventListener('error', function (event) {
+    if (settled) return;
+    var resource = event.target && (event.target.src || event.target.href);
+    show('界面加载失败', resource ? '资源加载失败：' + resource : reason(event.message || event.error), true);
+  }, true);
+  window.addEventListener('unhandledrejection', function (event) {
+    if (!settled) show('初始化异步任务失败', reason(event.reason), true);
+  });
+  setTimeout(function () {
+    if (!settled && !failed) {
+      show('启动耗时过长', '尚未完成首屏渲染。请检查本地后端与 WebView2 运行状态后重试；桌面版不会进入演示模式。', true);
+    }
+  }, 20000);
+})();
+</script>
 <script src="flags.js?v=1.0.7"></script>
 <script src="app.js?v=1.0.7"></script>
 </body>

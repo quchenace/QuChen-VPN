@@ -18,18 +18,21 @@ from . import sysproxy
 from . import updater
 
 APP_TITLE = "QuChen VPN"
-APP_VER = "1.0.11"
+APP_VER = "1.0.12"
 UPDATE_REPO = "quchenace/QuChen-VPN"
 
 
 def _base_dir() -> str:
     """定位包含 runtime/ 与 web/ 的资源根目录（源码运行 / PyInstaller 打包都适用）。"""
     cands = []
+    here = os.path.dirname(os.path.abspath(__file__))
     if getattr(sys, "frozen", False):
         exe_dir = os.path.dirname(sys.executable)
-        cands += [exe_dir, getattr(sys, "_MEIPASS", "") or exe_dir]
-    here = os.path.dirname(os.path.abspath(__file__))
-    cands += [os.path.dirname(os.path.dirname(here)), os.path.dirname(here), here]
+        # PyInstaller onedir 的 --add-data 位于 _MEIPASS（通常是 _internal）。
+        # exe 同级只保留给旧便携包兼容，不能优先于本次打包资源。
+        cands += [getattr(sys, "_MEIPASS", "") or exe_dir, exe_dir]
+    else:
+        cands += [os.path.dirname(os.path.dirname(here)), os.path.dirname(here), here]
     for c in cands:
         if c and os.path.isdir(os.path.join(c, "runtime", "core")):
             return c
