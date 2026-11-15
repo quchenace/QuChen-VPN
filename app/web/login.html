@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>登录 QuChen 账号</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #0f172a;
+    --muted: #64748b;
+    --line: #e2e8f0;
+    --brand: #2563eb;
+    --brand-2: #7c3aed;
+    --err: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(120% 120% at 12% 0%, #eef2ff 0%, #ffffff 45%, #f8fafc 100%);
+    color: var(--fg); font: 14px/1.6 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+    -webkit-user-select: none; user-select: none;
+  }
+  .card {
+    width: 380px; padding: 30px 30px 24px; border-radius: 16px;
+    background: rgba(255, 255, 255, .92); border: 1px solid var(--line);
+    box-shadow: 0 18px 46px rgba(15, 23, 42, .10);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .dot {
+    width: 30px; height: 30px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--brand), var(--brand-2));
+  }
+  .brand b { font-size: 16px; letter-spacing: .3px; }
+  .sub { color: var(--muted); font-size: 12.5px; margin: 0 0 20px; }
+  label { display: block; font-size: 12.5px; color: var(--muted); margin: 14px 0 6px; }
+  input {
+    width: 100%; height: 40px; padding: 0 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: #fff; color: var(--fg);
+    font-size: 13.5px; outline: none; transition: border-color .15s, box-shadow .15s;
+    -webkit-user-select: text; user-select: text;
+  }
+  input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(37, 99, 235, .12); }
+  button {
+    width: 100%; height: 42px; margin-top: 20px; border: 0; border-radius: 10px;
+    color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+    background: linear-gradient(135deg, var(--brand), var(--brand-2));
+  }
+  button:disabled { opacity: .55; cursor: default; }
+  .msg { min-height: 20px; margin-top: 12px; font-size: 12.5px; color: var(--muted); }
+  .msg.err { color: var(--err); }
+  .foot { margin-top: 14px; font-size: 11.5px; color: #94a3b8; text-align: center; }
+</style>
+</head>
+<body>
+  <form class="card" id="form" autocomplete="off">
+    <div class="brand"><span class="dot"></span><b>QUCHEN VPN</b></div>
+    <p class="sub">请登录 QuChen 账号后使用。账号需经管理员审批。</p>
+    <label for="email">邮箱</label>
+    <input id="email" type="email" placeholder="you@example.com" spellcheck="false" />
+    <label for="password">密码</label>
+    <input id="password" type="password" placeholder="请输入密码" />
+    <button id="submit" type="submit" disabled>登录</button>
+    <div class="msg" id="msg">正在连接账号服务…</div>
+    <div class="foot">登录状态本地保存，离线可用 30 天</div>
+  </form>
+<script>
+(function () {
+  var form = document.getElementById('form');
+  var emailEl = document.getElementById('email');
+  var passEl = document.getElementById('password');
+  var btn = document.getElementById('submit');
+  var msgEl = document.getElementById('msg');
+  var api = null;
+
+  function setMsg(text, isError) {
+    msgEl.textContent = text || '';
+    msgEl.className = 'msg' + (isError ? ' err' : '');
+  }
+
+  function ready() {
+    if (!window.pywebview || !window.pywebview.api) return;
+    api = window.pywebview.api;
+    btn.disabled = false;
+    setMsg('', false);
+    try {
+      Promise.resolve(api.account_state()).then(function (st) {
+        if (st && st.unlocked) {
+          location.replace('index.html#quchen-desktop');
+          return;
+        }
+        if (st && st.email) emailEl.value = st.email;
+      }).catch(function () {});
+    } catch (e) {}
+  }
+
+  window.addEventListener('pywebviewready', ready);
+  window.addEventListener('DOMContentLoaded', function () { setTimeout(ready, 300); });
+
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    if (!api) { setMsg('账号服务未就绪，请稍候重试', true); return; }
+    var email = (emailEl.value || '').trim();
+    var password = passEl.value || '';
+    if (!email || !password) { setMsg('请填写邮箱与密码', true); return; }
+    btn.disabled = true;
+    setMsg('正在登录…', false);
+    Promise.resolve(api.account_login(email, password)).then(function (res) {
+      if (res && res.ok) {
+        setMsg('登录成功，正在进入…', false);
+        setTimeout(function () { location.replace('index.html#quchen-desktop'); }, 220);
+        return;
+      }
+      btn.disabled = false;
+      var text = (res && (res.message || res.code)) || '登录失败';
+      if (res && res.code === 'bad_credentials') text = '邮箱或密码不正确';
+      if (res && res.code === 'pending_approval') text = '账号正在等待管理员审批';
+      if (res && res.code === 'account_disabled') text = '账号已被停用，请联系管理员';
+      setMsg(text, true);
+    }).catch(function (err) {
+      btn.disabled = false;
+      setMsg('登录失败：' + (err && err.message ? err.message : err), true);
+    });
+  });
+})();
+</script>
+</body>
+</html>

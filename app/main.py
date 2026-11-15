@@ -17,6 +17,15 @@ import webview
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from backend.service import Service, APP_TITLE, APP_VER  # noqa: E402
 from backend import sysproxy  # noqa: E402
+from backend.authgate import AuthError, Gate  # noqa: E402
+
+#: 未登录时不允许调用的敏感 API（连接、切换节点、改模式、系统代理/TUN、测速、诊断）。
+ACCOUNT_GATED_API = (
+    "bootstrap", "nodes", "node_page", "logs",
+    "connect", "disconnect", "toggle", "restart_core",
+    "select_node", "set_group", "set_mode", "set_sys_proxy", "set_tun",
+    "test_speed", "refresh", "diagnose",
+)
 
 user32 = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
@@ -207,6 +216,37 @@ class Api:
     def __init__(self, svc: Service):
         self.svc = svc
         self.window = None
+        self.gate = Gate(
+            "vpn",
+            enabled=os.environ.get("QUCHEN_ACCOUNT_GATE_DISABLED") != "1",
+            session_file=os.environ.get("QUCHEN_AUTH_SESSION_FILE") or None,
+        )
+
+    # -------------------------------------------------- 账号
+    def account_state(self):
+        return self.gate.reason()
+
+    def account_login(self, email, password):
+        email = (email or "").strip()
+        password = password or ""
+        if not email or not password:
+            return {"ok": False, "code": "bad_request", "message": "请填写邮箱与密码"}
+        try:
+            self.gate.login(email, password)
+        except AuthError as e:
+            return {"ok": False, "code": e.code, "status": e.status, "message": str(e)}
+        except Exception as e:
+            return {"ok": False, "code": "unreachable", "message": str(e)}
+        self.svc._log(f"[app] 账号已登录 {email}")
+        return {"ok": True, "state": self.gate.reason()}
+
+    def account_logout(self):
+        try:
+            self.gate.logout()
+        except Exception:
+            pass
+        self.svc._log("[app] 账号已退出")
+        return {"ok": True, "state": self.gate.reason()}
 
     # -------------------------------------------------- 内部
     def _hwnd(self):
@@ -539,6 +579,26 @@ class Api:
         return {"ok": True}
 
 
+def _install_account_guard(api: "Api") -> None:
+    """未登录时把所有业务 API 拦成 AUTH_REQUIRED（登录页只允许调账号三件套）。"""
+    if not getattr(api.gate, "enabled", True):
+        return
+    for name in ACCOUNT_GATED_API:
+        fn = getattr(api, name, None)
+        if not callable(fn):
+            continue
+
+        def make(original=fn):
+            @functools.wraps(original)
+            def wrapper(*args, **kwargs):
+                if not api.gate.unlocked():
+                    return {"ok": False, "error": "AUTH_REQUIRED", "auth_required": True}
+                return original(*args, **kwargs)
+            return wrapper
+
+        setattr(api, name, make())
+
+
 def _icon_path(base: str) -> str:
     for name in ("app.ico", "icon.ico"):
         p = os.path.join(base, "assets", name)
@@ -588,9 +648,15 @@ def main():
     svc._serializable = False
     svc._log(f"[app] {APP_TITLE} v{APP_VER} 启动")
     api = Api(svc)
+    _install_account_guard(api)
     base = svc.base
     html_path, web_candidates = _locate_web_index()
-    if html_path:
+    account_unlocked = api.gate.unlocked()
+    login_path = os.path.join(os.path.dirname(html_path), "login.html") if html_path else ""
+    if html_path and not account_unlocked and os.path.isfile(login_path):
+        svc._log(f"[app] 未登录，先加载登录墙 {login_path}")
+        page = {"url": login_path + "#quchen-login"}
+    elif html_path:
         svc._log(f"[app] 界面资源 {html_path}")
         # pywebview 的本地 HTTP 服务也使用 http:，片段供前端识别桌面页面并禁用 mock。
         page = {"url": html_path + "#quchen-desktop"}
@@ -631,6 +697,9 @@ def main():
 
     def autoconnect():
         # 等界面渲染完（最多 25s）再自动连接；界面没起来就不连，优先保证窗口可用
+        if not api.gate.unlocked():
+            svc._log("[app] 未登录，跳过自动连接")
+            return
         if not ready_evt.wait(25):
             svc._log("[app] 界面未就绪，本次跳过自动连接")
             return
