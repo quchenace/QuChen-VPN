@@ -42,7 +42,7 @@ def _ssl_ctx(url):
 from pathlib import Path
 
 DEFAULT_BASE = os.environ.get("QUCHEN_AUTH_BASE", "https://frp-any.com:19549")
-OFFLINE_GRACE_DAYS = 30
+OFFLINE_GRACE_DAYS = 7  # 离线宽限收紧：默认 7 天；服务端下发更严格时以服务端为准
 REFRESH_SKEW = 24 * 3600          # access 快到期时提前续
 
 
@@ -151,6 +151,28 @@ class Gate:
         except (urllib.error.URLError, TimeoutError, OSError) as err:
             raise AuthError(0, "unreachable", f"账号服务不可达：{err}") from None
 
+    def send_code(self, email: str, purpose: str = "register") -> dict:
+        """发送邮箱验证码（purpose: register / reset / login）。"""
+        target = (email or "").strip().lower()
+        if not target:
+            raise AuthError(400, "bad_request", "请填写邮箱")
+        return self._request("/api/auth/send-code", {"email": target, "purpose": purpose})
+
+    def register(self, email: str, code: str, password: str) -> dict:
+        """邮箱验证码注册。
+
+        服务端开启 require_approval 时返回 status='pending'，需管理员审批后才能登录；
+        未开启审批时返回 status='active'，可直接 login()。
+        """
+        target = (email or "").strip().lower()
+        return self._request("/api/auth/register", {
+            "email": target,
+            "code": (code or "").strip(),
+            "password": password or "",
+            "device_id": self.app,
+            "device_name": self.app,
+        })
+
     def login(self, email: str, password: str, device_name: str | None = None) -> dict:
         payload = {"email": email, "password": password,
                    "device_id": self.app, "device_name": device_name or self.app}
@@ -167,6 +189,13 @@ class Gate:
             "last_verified": now,
             "revoked": False,
         }
+        gd = data.get("offline_grace_days")
+        try:
+            gd_i = int(gd)
+        except (TypeError, ValueError):
+            gd_i = None
+        if gd_i is not None and 0 <= gd_i < self.grace_days:
+            self.grace_days = gd_i
         self._save(state)
         return state
 

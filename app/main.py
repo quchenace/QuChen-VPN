@@ -240,6 +240,33 @@ class Api:
         self.svc._log(f"[app] 账号已登录 {email}")
         return {"ok": True, "state": self.gate.reason()}
 
+    def account_send_code(self, email, purpose="register"):
+        email = (email or "").strip()
+        if not email:
+            return {"ok": False, "code": "bad_request", "message": "请填写邮箱"}
+        try:
+            data = self.gate.send_code(email, purpose or "register")
+        except AuthError as e:
+            return {"ok": False, "code": e.code, "status": e.status, "message": str(e)}
+        except Exception as e:
+            return {"ok": False, "code": "unreachable", "message": str(e)}
+        return {"ok": True, "ttl": data.get("ttl"), "resend_after": data.get("resend_after"),
+                "message": data.get("message"), "dev_code": data.get("dev_code")}
+
+    def account_register(self, email, code, password):
+        email = (email or "").strip()
+        code = (code or "").strip()
+        if not email or not code or not password:
+            return {"ok": False, "code": "bad_request", "message": "请填写邮箱、验证码与密码"}
+        try:
+            data = self.gate.register(email, code, password)
+        except AuthError as e:
+            return {"ok": False, "code": e.code, "status": e.status, "message": str(e)}
+        except Exception as e:
+            return {"ok": False, "code": "unreachable", "message": str(e)}
+        self.svc._log(f"[app] 账号注册 {email} status={data.get('status')}")
+        return {"ok": True, "status": data.get("status"), "message": data.get("message")}
+
     def account_logout(self):
         try:
             self.gate.logout()
