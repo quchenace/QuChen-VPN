@@ -1,6 +1,6 @@
 """QuChen VPN 登录墙自测（不依赖 pywebview，直接测 Api 层门禁）。
 
-    cd D:\QuChenDev\QuChen-VPN
+    cd D:\QUCHENALL\QuChenDev\QuChen-VPN
     python tools\auth_gate_test.py
 
 覆盖：未登录拦截业务 API、登录成功放行、退出登录重新拦截、开关关闭直通、会话文件不存密码。
