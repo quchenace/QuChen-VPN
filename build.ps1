@@ -1,4 +1,4 @@
-# Build QuChen VPN (PyInstaller onedir)
+﻿# Build QuChen VPN (PyInstaller onedir)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
