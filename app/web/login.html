@@ -84,7 +84,7 @@
           style="width:100%;margin-top:14px;padding:12px 14px;border-radius:10px;border:0;background:linear-gradient(135deg,#4d8dff,#3f7aee);color:#fff;font:15px/1 inherit;font-weight:600;cursor:pointer">注册账号</button>
       </div>
       <div style="margin-top:12px;font-size:12px;color:#7d8595;text-align:center">忘记密码？<a href="https://frp-any.com:19549/login.html#reset" target="_blank" rel="noopener" style="color:#6aa2ff;text-decoration:none;margin-left:2px">到官网账号中心重置</a></div>
-    <div class="foot">登录状态本地保存，离线可用 30 天</div>
+    <div class="foot">登录状态本地保存，离线可用 7 天（服务端可调）</div>
   </form>
 <script>
 (function () {
@@ -171,6 +171,8 @@
       var el = document.getElementById(id);
       if (el) el.style.display = reg ? 'none' : '';
     });
+    var lab = document.querySelectorAll('label[for="email"], label[for="password"]');
+    for (var i = 0; i < lab.length; i++) lab[i].style.display = reg ? 'none' : '';
     pane.style.display = reg ? '' : 'none';
     tabLogin.style.background = reg ? 'transparent' : 'rgba(255,255,255,.10)';
     tabLogin.style.color = reg ? '#8b93a3' : '#e8ecf2';
@@ -197,7 +199,12 @@
       too_soon: '发送太频繁，请稍后再试。',
       smtp_failed: '验证码邮件发送失败，请稍后重试。',
       bad_request: '请检查填写内容。',
-      unreachable: '连不上账号服务，请确认网络后重试。'
+      unreachable: '连不上账号服务，请确认网络后重试。',
+      weak_password: '密码需 8-128 位，请重新设置。',
+      pending_approval: '账号待管理员审批，通过后即可登录。',
+      bad_credentials: '邮箱或密码不正确。',
+      locked: '密码错误次数过多，请稍后再试或重置密码。',
+      too_many_devices: '设备数已达上限，请先在账号中心移出旧设备。'
     };
     if (map[code]) return map[code];
     return (res && res.message) || '操作失败，请重试。';
